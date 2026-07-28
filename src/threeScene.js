@@ -175,10 +175,19 @@ export function createThreeScene(container) {
   // GDD 4A: real directional + hemisphere lighting is the depth cue now,
   // not a bolt-on. Source block textures were confirmed flat/unbevelled, so
   // there's nothing baked-in for this lighting to fight.
-  const hemi = new THREE.HemisphereLight(0x9fb8d9, 0x3a2f26, 0.55);
+  // lighting-contrast-pass: the original single-key-light + dim hemisphere
+  // setup read flat against the reference's punchy multi-directional
+  // highlight/shadow look. Bumped key intensity, added a lower-intensity
+  // rim/fill light from the opposite side/below so shadowed faces pick up
+  // some visible light instead of going pure black, and rebalanced the
+  // hemisphere so ambient fill doesn't wash out the extra contrast from the
+  // two directional lights. Values chosen by eye for readable per-cube
+  // highlight/shadow definition, not a color-match to the reference (that's
+  // explicitly out of scope — different art style).
+  const hemi = new THREE.HemisphereLight(0xbcd4f2, 0x2a2118, 0.4);
   scene.add(hemi);
 
-  const keyLight = new THREE.DirectionalLight(0xfff2d9, 1.1);
+  const keyLight = new THREE.DirectionalLight(0xfff2d9, 1.65);
   // Re-aimed for the front-on wall: light comes from upper-camera-side
   // (off to one side and above, and slightly toward the camera in Z) so the
   // cube faces facing the viewer still pick up visible directional shading
@@ -197,6 +206,17 @@ export function createThreeScene(container) {
   keyLight.shadow.camera.far = BOARD_SIZE * 4;
   scene.add(keyLight);
   scene.add(keyLight.target);
+
+  // Secondary fill/rim light: opposite side (lower-left, and behind toward
+  // the backdrop) at low intensity and a cool tint so it reads as
+  // reflected-ambient bounce rather than a second obvious sun — its job is
+  // only to lift shadowed cube faces off pure black, not to compete with
+  // the key light. No shadow casting (a fill light casting its own shadow
+  // just muddies the key light's shadow instead of adding depth).
+  const fillLight = new THREE.DirectionalLight(0x9fc4ff, 0.45);
+  fillLight.position.set(-BOARD_SIZE * 0.7, -BOARD_SIZE * 0.3, BOARD_SIZE * 0.5);
+  scene.add(fillLight);
+  scene.add(fillLight.target);
 
   // ---- backdrop wall (GDD 4A, corrected 2026-07-28: front-on framing has
   // no floor visible — replaces the old ground/table stub plane with a flat
@@ -252,6 +272,18 @@ export function createThreeScene(container) {
   // textures finish loading below (async), same first-paint fallback
   // contract as the backdrop above and as render-swap's 2D drawBlockCell().
   const placeholderMat = new THREE.MeshStandardMaterial({ color: 0x8fa3b8, roughness: 0.85, metalness: 0.05 });
+  // grid-visibility-fix: empty board cells used to be fully hidden
+  // (cube.visible = false), which erased the 8x8 grid structure entirely
+  // whenever a cell was unoccupied -- against the dark brick backdrop there
+  // was nothing to read as "a board" at all. The reference image always
+  // shows a dim placeholder tile per empty cell. Reuse the same dark tone
+  // the 2D renderer's CSS custom property --empty-cell already uses
+  // (index.html: #2a2d36 dark theme baseline) so the empty-slot look stays
+  // visually consistent with the 2D renderer instead of inventing a new
+  // color. Slightly lower roughness/higher metalness than placeholderMat so
+  // it still catches a faint highlight from the key light and reads as a
+  // recessed "socket," not just a flat gray square.
+  const emptyCellMat = new THREE.MeshStandardMaterial({ color: 0x2a2d36, roughness: 0.9, metalness: 0.1 });
   // juice-effects-port: all 64 cube meshes live under one Group so the zoom
   // pulse (GDD 12.4, board scales 1.0->1.03->1.0) and the death-sequence
   // shake (GDD 12.8, 6px/300ms-decay) can be applied as a single group
@@ -262,19 +294,17 @@ export function createThreeScene(container) {
   const cubes = [];
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
-      const cube = new THREE.Mesh(cubeGeo, placeholderMat);
+      // grid-visibility-fix: start on the dim empty-slot material instead of
+      // placeholderMat, and stay VISIBLE — every cube renders from frame
+      // one, occupied or not, so the 8x8 grid structure always reads even
+      // before the first setBoardState() call lands.
+      const cube = new THREE.Mesh(cubeGeo, emptyCellMat);
       // Row 0 is the top of the board on screen, so row increases downward
       // in board-space but Y increases upward in world-space — flip r here.
       const baseY = (BOARD_HALF - r) * CELL_STRIDE;
       cube.position.set((c - BOARD_HALF) * CELL_STRIDE, baseY, CUBE_HEIGHT / 2);
       cube.castShadow = true;
       cube.receiveShadow = true;
-      // Hidden until the first real board-state sync (gameplay-state-wiring)
-      // assigns real occupied/empty state — an unoccupied board cell has no
-      // family to show, so cubes start invisible rather than a flat demo
-      // color, per the "empty cell -> hidden/dim" fallback contract this
-      // workstream's brief calls for.
-      cube.visible = false;
       boardGroup.add(cube);
       // baseY/baseMat/ownMaterial/baseColor are juice-effects-port additions:
       // baseY is the cube's resting Y (landing drop-in animates away from and
@@ -378,7 +408,19 @@ export function createThreeScene(container) {
     for (const entry of cubes) {
       const cell = board && board[entry.r] ? board[entry.r][entry.c] : null;
       if (cell == null) {
-        entry.mesh.visible = false;
+        // grid-visibility-fix: stay visible on the dim empty-slot material
+        // rather than hiding the mesh, so the grid structure never
+        // disappears. Also clean up any leftover per-cell material clone
+        // from a previous occupied state (a cell can go occupied -> empty
+        // via a line clear) so it doesn't leak.
+        if (entry.ownMaterial) {
+          entry.ownMaterial.dispose();
+          entry.ownMaterial = null;
+        }
+        entry.baseMat = null;
+        entry.baseColor = null;
+        entry.mesh.material = emptyCellMat;
+        entry.mesh.visible = true;
         entry.family = null;
         continue;
       }
@@ -450,6 +492,14 @@ export function createThreeScene(container) {
   // per file.
   const gltfLoader = new GLTFLoader();
   const mascots = [];
+  // mascot-idle-animation: every mascot glTF ships baked animation clips
+  // (an 'Idle' clip on all four, confirmed via node inspection), but until
+  // now nothing ever created an AnimationMixer/played a clip, so mascots
+  // rendered frozen in the raw bind pose. One AnimationMixer per mascot,
+  // driven from render()'s existing vnow()-derived delta below, so idle
+  // playback pauses/resumes exactly like every other juice-effects-port
+  // animation in this file.
+  const mascotMixers = [];
   const mascotsLoaded = Promise.all(
     MASCOTS.map((cfg) =>
       gltfLoader.loadAsync(cfg.url).then((gltf) => {
@@ -474,6 +524,21 @@ export function createThreeScene(container) {
         });
         scene.add(root);
         const entry = { name: cfg.url.split('/').pop().replace('.gltf', ''), root };
+        const clips = gltf.animations || [];
+        if (clips.length) {
+          const mixer = new THREE.AnimationMixer(root);
+          // Prefer an 'Idle' clip by name (case-insensitive); fall back to
+          // the first clip in the file if a mascot's clip happens to be
+          // named differently, so idle playback never silently no-ops.
+          const idleClip =
+            clips.find((c) => /idle/i.test(c.name)) || clips[0];
+          const action = mixer.clipAction(idleClip);
+          action.setLoop(THREE.LoopRepeat, Infinity);
+          action.play();
+          entry.mixer = mixer;
+          entry.idleClipName = idleClip.name;
+          mascotMixers.push(mixer);
+        }
         mascots.push(entry);
         return entry;
       })
@@ -784,6 +849,13 @@ export function createThreeScene(container) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   }
 
+  // mascot-idle-animation: last vnow() render() saw, used to derive a
+  // per-frame delta for AnimationMixer.update() (mixers need a delta, not
+  // an absolute timestamp). vnow() is already pause-safe/pinned while
+  // paused, so a delta computed from consecutive vnow() reads is 0 during
+  // pause and resumes cleanly, same guarantee every other effect above
+  // gets for free.
+  let lastMixerNow = null;
   function render() {
     // juice-effects-port: advance every vnow()-keyed effect once per frame,
     // BEFORE the actual GPU render call -- this is what makes pause/resume
@@ -796,6 +868,13 @@ export function createThreeScene(container) {
     updateGoldFlash(now);
     updateZoomAndShake(now);
     updateCubeVisuals(now);
+    if (lastMixerNow === null) lastMixerNow = now;
+    const deltaMs = Math.max(0, now - lastMixerNow);
+    lastMixerNow = now;
+    if (deltaMs > 0 && mascotMixers.length) {
+      const deltaSec = deltaMs / 1000;
+      for (const mixer of mascotMixers) mixer.update(deltaSec);
+    }
     if (isDeathFreezeActive(now)) return; // GDD 12.8 freeze-frame: skip this render call entirely, same as main.js's draw()-skip
     renderer.render(scene, camera);
   }
@@ -803,6 +882,7 @@ export function createThreeScene(container) {
   function dispose() {
     cubeGeo.dispose();
     placeholderMat.dispose();
+    emptyCellMat.dispose();
     familyMaterials.forEach(({ mat }) => {
       if (mat.map) mat.map.dispose();
       mat.dispose();
@@ -838,7 +918,9 @@ export function createThreeScene(container) {
     ledge,
     mascots,
     mascotsLoaded,
+    mascotMixers,
     keyLight,
+    fillLight,
     hemi,
     resize,
     render,
