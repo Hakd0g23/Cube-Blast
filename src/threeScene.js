@@ -27,8 +27,17 @@
 
 import * as THREE from 'https://unpkg.com/three@0.180.0/build/three.module.js';
 import { GLTFLoader } from 'https://unpkg.com/three@0.180.0/examples/jsm/loaders/GLTFLoader.js';
+// neon-blocks-pass: bloom post-processing so emissive "neon" cube faces
+// actually read as glowing rather than just a slightly brighter flat color.
+// Same pinned three@0.180.0 CDN version as the GLTFLoader import above, so
+// the postprocessing examples modules are guaranteed API-compatible with the
+// core three module also loaded from that version.
+import { EffectComposer } from 'https://unpkg.com/three@0.180.0/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'https://unpkg.com/three@0.180.0/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'https://unpkg.com/three@0.180.0/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'https://unpkg.com/three@0.180.0/examples/jsm/postprocessing/OutputPass.js';
 import { BOARD_SIZE } from './pieces.js';
-import { BLOCK_MAP_PATH, FAMILY_BY_COLOR } from './blockTextureConfig.js';
+import { FAMILY_BY_COLOR } from './blockTextureConfig.js';
 // juice-effects-port: reuse the SAME pause-safe virtual clock ux-loading-pass
 // built for the 2D renderer (src/main.js) rather than creating a second one --
 // every timing calculation below reads through this single vnow(), so
@@ -42,7 +51,17 @@ const WORLD_UNITS_PER_PX = 1 / CELL_PX;
 const CELL_STRIDE = 1; // one board cell == 1 world unit, by construction above
 const GUTTER_WORLD = GUTTER_PX * WORLD_UNITS_PER_PX; // ~0.0714 world units
 const CUBE_FOOTPRINT = CELL_STRIDE - GUTTER_WORLD; // visible gap between cubes
-const CUBE_HEIGHT = 0.4; // chunky "voxel" look; not GDD-specified, first-pass value
+// depth-pass (2026-07-29): bumped from the original 0.4 -- against the
+// ~0.93 XY footprint (CUBE_FOOTPRINT below) that read as a thin plate/tile,
+// not a proper cube. 0.8 lands inside the "reads as a cube, not a brick or a
+// slab" range without pushing the front face far enough forward to fight
+// the fixed front-on camera framing. Every Z-offset elsewhere in this file
+// that positions something "just in front of the cube face" (gold flash,
+// shard/break-effect chips, placement preview, the ledge) is expressed
+// RELATIVE to this constant already, so they scale with it automatically —
+// re-checked by eye after this bump, not just assumed (see this pass's
+// verification notes).
+const CUBE_HEIGHT = 0.8; // chunky "voxel" look; not GDD-specified, first-pass value
 const BOARD_HALF = (BOARD_SIZE - 1) / 2;
 
 // Fixed FRONT-ON camera position (GDD 4A, corrected 2026-07-28: classic-
@@ -51,8 +70,46 @@ const BOARD_HALF = (BOARD_SIZE - 1) / 2;
 // derived from board size so the whole 8x8 grid frames comfortably
 // regardless of exact px constants above.
 const CAMERA_DISTANCE = BOARD_SIZE * 1.35;
-const FRUSTUM_MARGIN = 1.25; // extra headroom so the board doesn't clip frustum edges
 const BACKDROP_DEPTH = BOARD_SIZE * 0.75; // how far behind the board plane the backdrop wall sits
+
+// scene-layout-cleanup (2026-07-29): the ORIGINAL symmetric-frustum framing
+// (a single FRUSTUM_MARGIN applied equally top/bottom) packed the board,
+// the ledge, and both mascot pairs into the same vertical span the fixed-
+// size #three-stage-wrap square already had to also fit the DOM shard-queue
+// row (top) and DOM tray row (bottom) OVER, per the live screenshot the user
+// flagged: the queue box sat awkwardly on top of the board's top-left
+// corner, and the mascots visually overlapped the board's own bottom rows
+// (their heads landed inside the board's own world-Y span). Fixing this for
+// real (not just nudging px) means giving the vertical frustum asymmetric,
+// deliberately-sized top/bottom margins instead of one symmetric value:
+//   - TOP_UI_MARGIN_FRAC: empty world-space band above the board's top edge,
+//     sized to clear the shard-queue DOM row's own rendered height (see
+//     index.html's #three-queue-row CSS: label + up to 40px slot + padding).
+//   - BOTTOM_UI_MARGIN_FRAC: empty world-space band below the ledge/mascot
+//     cluster, sized to clear the tray DOM row (label + up to 78px slot).
+//   - LEDGE_MASCOT_ZONE_FRAC: dedicated band directly under the board for
+//     the ledge + standing mascots, so their own geometry can't spill up
+//     into the board's rows OR down into the tray-row margin.
+//   - The board itself keeps the remaining (largest) fraction so gameplay
+//     legibility stays the priority; this DOES render the grid somewhat
+//     smaller than the old symmetric framing to make room for the other
+//     three bands within the same fixed-px square container — an explicit,
+//     deliberate trade-off (not a bug), per the brief's "adjust camera
+//     distance/framing... within the fixed front-on constraint."
+// These fractions were tuned by eye against a real Playwright screenshot of
+// the live composition (not derived from a closed-form layout formula) --
+// if index.html's queue/tray row CSS sizes change materially, re-check this
+// framing against a fresh screenshot rather than assuming it still holds.
+const BOARD_WORLD_HALF_HEIGHT = BOARD_HALF + CUBE_FOOTPRINT / 2; // board's own top/bottom edge distance from y=0
+const TOP_UI_MARGIN_FRAC = 0.14;
+const BOTTOM_UI_MARGIN_FRAC = 0.21;
+const BOARD_FRAC = 0.53;
+// LEDGE_MASCOT_ZONE_FRAC is whatever's left after the other three bands.
+const LEDGE_MASCOT_ZONE_FRAC = 1 - TOP_UI_MARGIN_FRAC - BOTTOM_UI_MARGIN_FRAC - BOARD_FRAC;
+const TOTAL_WORLD_HEIGHT = (2 * BOARD_WORLD_HALF_HEIGHT) / BOARD_FRAC;
+const FRUSTUM_TOP_WORLD = BOARD_WORLD_HALF_HEIGHT + TOP_UI_MARGIN_FRAC * TOTAL_WORLD_HEIGHT;
+const FRUSTUM_BOTTOM_WORLD = FRUSTUM_TOP_WORLD - TOTAL_WORLD_HEIGHT;
+const LEDGE_MASCOT_ZONE_WORLD = LEDGE_MASCOT_ZONE_FRAC * TOTAL_WORLD_HEIGHT; // budget the ledge+mascot geometry below must fit inside
 
 // ---- juice-effects-port constants (workstream: juice-effects-port) --------
 // Ported 1:1 from src/main.js's GDD-12 juice-pass numbers (same durations/
@@ -89,21 +146,23 @@ const GOLD_HEX = 0xf4c430; // literal #F4C430, same as main.js's GOLD constant
 const BOARD_BOTTOM_EDGE = -BOARD_HALF - CUBE_FOOTPRINT / 2; // y of the board's lowest cube edge
 const LEDGE_HEIGHT = 0.3;
 const LEDGE_DEPTH = 1.2;
-const LEDGE_GAP = 0.05; // small visual gap between the board's bottom edge and the ledge top
+// scene-layout-cleanup: widened from 0.05 to a real visible gap now that the
+// asymmetric frustum above actually budgets room for it (LEDGE_MASCOT_ZONE_
+// WORLD) -- a bigger gap reads more clearly as "board" then "separate ledge
+// shelf below it" instead of the ledge looking fused onto the board's
+// underside.
+const LEDGE_GAP = 0.12;
 const LEDGE_TOP_Y = BOARD_BOTTOM_EDGE - LEDGE_GAP;
 const LEDGE_CENTER_Y = LEDGE_TOP_Y - LEDGE_HEIGHT / 2;
 const LEDGE_CENTER_Z = CUBE_HEIGHT / 2 + LEDGE_DEPTH / 2 - 0.1; // steps slightly toward the camera from the board plane
 const LEDGE_WIDTH = BOARD_SIZE + 1.5; // a bit wider than the board so flanking props have room
 
-// ---- texture-to-material-mapping constants -------------------------------
-// Backdrop brick texture: cropped 16x16 tile from the Quaternius Cube World
-// pack's Blocks_PixelArt.png (Downloads/Cube World - Aug 2023/), copied into
-// assets/blocks/ so the game doesn't depend on the user's Downloads folder at
-// runtime (same self-contained-assets convention as MASCOTS above). Repeated
-// via texture.repeat, not a single stretched image, so it reads as an actual
-// brick wall rather than one giant smeared brick.
-const BRICK_TEXTURE_PATH = new URL('../assets/blocks/brick_wall_quaternius.png', import.meta.url).href;
-const BRICK_TILE_WORLD_SIZE = 0.5; // world units per brick tile repeat — an aesthetic choice, not derived from any GDD px spec
+// ---- backdrop constants (neon-blocks-pass) -------------------------------
+// backdrop-cleanup (2026-07-29): retired the tiled brick-wall texture here --
+// the user called it "confusing" clutter behind an already-busy board.
+// Replaced with a plain vertical dark gradient (built procedurally below,
+// makeBackdropGradientTexture()) instead of any external image asset, so the
+// backdrop reads as a clean neon-arcade void rather than a textured wall.
 const BACKDROP_SIZE = BOARD_SIZE * 3; // matches backdropGeo's PlaneGeometry dimensions below
 
 // Mascot glTF assets (real Quaternius CC0 static meshes, per GDD 4A's
@@ -123,22 +182,72 @@ const BACKDROP_SIZE = BOARD_SIZE * 3; // matches backdropGeo's PlaneGeometry dim
 // copying.
 //
 // LEDGE_MARGIN keeps the same "how far from the ledge's ends" convention
-// the original 2-prop layout used (1.1 world units in from each edge);
-// four props are now spread evenly across the space between those margins
-// instead of just the two flanking ends.
+// the original 2-prop layout used (1.1 world units in from each edge).
+//
+// mascot-clustering (2026-07-29): the user asked for two PAIRS instead of
+// one evenly-spaced row of 4 -- "Boy dog to the lower left and Girl and cat
+// on the lower right." clusterSlotX(side, indexInCluster, clusterCount)
+// places `clusterCount` mascots close together around a cluster center that
+// itself sits partway out toward one end of the ledge's usable span (side =
+// -1 for the left cluster, +1 for the right), rather than ledgeSlotX's old
+// "spread evenly across the WHOLE span" behavior.
 const LEDGE_MARGIN = 1.1;
 const LEDGE_USABLE_HALF = LEDGE_WIDTH / 2 - LEDGE_MARGIN;
-function ledgeSlotX(index, count) {
-  if (count === 1) return 0;
-  const t = index / (count - 1); // 0..1 across the usable ledge span
-  return -LEDGE_USABLE_HALF + t * (2 * LEDGE_USABLE_HALF);
+const CLUSTER_CENTER_OFFSET = LEDGE_USABLE_HALF * 0.55; // how far each cluster's center sits from the ledge's own center
+const CLUSTER_INNER_GAP = 0.85; // world units between the two mascots within one cluster
+function clusterSlotX(side, indexInCluster, clusterCount) {
+  const center = side * CLUSTER_CENTER_OFFSET;
+  if (clusterCount === 1) return center;
+  const halfSpan = (CLUSTER_INNER_GAP * (clusterCount - 1)) / 2;
+  const t = indexInCluster / (clusterCount - 1); // 0..1 across this cluster's own span
+  return center - halfSpan + t * (2 * halfSpan);
 }
+// scene-layout-cleanup: target heights trimmed down from the original
+// 1.3/1.35 (humans) -- at that height the mascots' heads reached up into the
+// board's own bottom rows once the asymmetric frustum above gave the ledge/
+// mascot band its own dedicated (finite) vertical budget. Smaller mascots
+// also just read better as "props on a shelf below the board" rather than
+// human-scale figures competing with the grid for attention.
 const MASCOTS = [
-  { url: new URL('../assets/mascots/Character_Female_1.gltf', import.meta.url).href, targetHeight: 1.3, x: ledgeSlotX(0, 4) },
-  { url: new URL('../assets/mascots/Character_Male_1.gltf', import.meta.url).href, targetHeight: 1.35, x: ledgeSlotX(1, 4) },
-  { url: new URL('../assets/mascots/Dog.gltf', import.meta.url).href, targetHeight: 0.55, x: ledgeSlotX(2, 4) },
-  { url: new URL('../assets/mascots/Cat.gltf', import.meta.url).href, targetHeight: 0.4, x: ledgeSlotX(3, 4) },
+  // Left cluster: boy + dog.
+  { url: new URL('../assets/mascots/Character_Male_1.gltf', import.meta.url).href, targetHeight: 1.05, x: clusterSlotX(-1, 0, 2) },
+  { url: new URL('../assets/mascots/Dog.gltf', import.meta.url).href, targetHeight: 0.48, x: clusterSlotX(-1, 1, 2) },
+  // Right cluster: girl + cat.
+  { url: new URL('../assets/mascots/Character_Female_1.gltf', import.meta.url).href, targetHeight: 1.0, x: clusterSlotX(1, 0, 2) },
+  { url: new URL('../assets/mascots/Cat.gltf', import.meta.url).href, targetHeight: 0.36, x: clusterSlotX(1, 1, 2) },
 ];
+
+// ---- neon-blocks-pass: per-family neon material colors ------------------
+// Replaces texture-to-material-mapping's PNG-textured cube materials
+// (assets/blocks/*.png, block-map.json) entirely -- the user asked for a
+// "neon blocks" look ("I guess lets keep them neon blocks"), which reads as
+// flat glowing color, not a pixel-art block texture (the same "too busy"
+// complaint that killed the brick backdrop applies to a photographic block
+// texture fighting a glow effect). Built directly and SYNCHRONOUSLY from
+// FAMILY_BY_COLOR's own 7 game-palette hex values (src/blockTextureConfig.js,
+// the actual piece colors src/core.js deals cells in) -- no network fetch,
+// no block-map.json dependency, no async load/fail path needed anymore for
+// cube materials.
+//
+// vibrant-color-pass: FAMILY_BY_COLOR's hex values as authored are fairly
+// muted (game-palette colors chosen for legibility against a plain 2D
+// canvas fill, not for glow). boostSaturation() pushes each one toward
+// fuller saturation/lightness before it becomes a material's base color/
+// emissive tint, so the neon look reads as genuinely vibrant/punchy rather
+// than just "the same muted color, now glowing."
+const NEON_EMISSIVE_INTENSITY = 1.15;
+function boostSaturation(hex, satTarget = 0.92, lightTarget = 0.56) {
+  const c = new THREE.Color(hex);
+  const hsl = { h: 0, s: 0, l: 0 };
+  c.getHSL(hsl);
+  // Only ever push saturation/lightness UP toward the target, never down --
+  // a source color that's already more vivid than the target should stay
+  // that way rather than getting flattened toward it.
+  const s = Math.max(hsl.s, satTarget);
+  const l = Math.min(Math.max(hsl.l, lightTarget * 0.85), lightTarget);
+  c.setHSL(hsl.h, s, l);
+  return c;
+}
 
 /**
  * Builds the Three.js renderer/scene/camera/lighting infrastructure inside
@@ -171,23 +280,44 @@ export function createThreeScene(container) {
   renderer.shadowMap.enabled = true;
   container.appendChild(renderer.domElement);
 
+  // ---- neon-blocks-pass: bloom post-processing ---------------------------
+  // A composer pipeline (RenderPass -> UnrealBloomPass -> OutputPass)
+  // replaces the old single renderer.render(scene, camera) call in render()
+  // below. Threshold is set high enough (0.72, near the top of the 0..1
+  // range UnrealBloomPass reads scene luminance against) that the backdrop
+  // gradient, ledge, and empty-cell dim tiles stay UN-bloomed -- only the
+  // genuinely bright emissive neon cube faces (and the gold flash / shard
+  // effects, which are already near-white/saturated) exceed it and glow.
+  // Kept as a real (if judgment-call) scope decision rather than skipped:
+  // flat emissive alone read as "slightly brighter color," not "glowing" --
+  // see this pass's summary for the tradeoff (added GPU cost of an extra
+  // full-screen blur pass, negligible for an 8x8-cube scene at this
+  // resolution).
+  const composer = new EffectComposer(renderer);
+  const renderPass = new RenderPass(scene, camera);
+  composer.addPass(renderPass);
+  const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.55, 0.5, 0.72);
+  composer.addPass(bloomPass);
+  const outputPass = new OutputPass();
+  composer.addPass(outputPass);
+
   // ---- lighting: replaces the retired Canvas 2D bevel trick -------------
   // GDD 4A: real directional + hemisphere lighting is the depth cue now,
   // not a bolt-on. Source block textures were confirmed flat/unbevelled, so
   // there's nothing baked-in for this lighting to fight.
-  // lighting-contrast-pass: the original single-key-light + dim hemisphere
-  // setup read flat against the reference's punchy multi-directional
-  // highlight/shadow look. Bumped key intensity, added a lower-intensity
-  // rim/fill light from the opposite side/below so shadowed faces pick up
-  // some visible light instead of going pure black, and rebalanced the
-  // hemisphere so ambient fill doesn't wash out the extra contrast from the
-  // two directional lights. Values chosen by eye for readable per-cube
-  // highlight/shadow definition, not a color-match to the reference (that's
-  // explicitly out of scope — different art style).
-  const hemi = new THREE.HemisphereLight(0xbcd4f2, 0x2a2118, 0.4);
+  // lighting-pass-2 (2026-07-29): the user said "we need more lighting"
+  // even after the first contrast pass (bumped key + one cool fill). Bumped
+  // key/fill further still, AND — leaning into the neon-blocks direction
+  // instead of just brighter white light — added two low-intensity COLORED
+  // accent point lights (cyan from one side, magenta from the other) near
+  // the board plane. Their job isn't scene-wide illumination (that's still
+  // the key/fill/hemisphere's job) -- it's tinting the cube faces' own
+  // highlights with a bit of arcade-neon color so the glow reads as
+  // deliberately colorful, not just "brighter."
+  const hemi = new THREE.HemisphereLight(0xbcd4f2, 0x2a2118, 0.45);
   scene.add(hemi);
 
-  const keyLight = new THREE.DirectionalLight(0xfff2d9, 1.65);
+  const keyLight = new THREE.DirectionalLight(0xfff2d9, 2.1);
   // Re-aimed for the front-on wall: light comes from upper-camera-side
   // (off to one side and above, and slightly toward the camera in Z) so the
   // cube faces facing the viewer still pick up visible directional shading
@@ -213,53 +343,66 @@ export function createThreeScene(container) {
   // only to lift shadowed cube faces off pure black, not to compete with
   // the key light. No shadow casting (a fill light casting its own shadow
   // just muddies the key light's shadow instead of adding depth).
-  const fillLight = new THREE.DirectionalLight(0x9fc4ff, 0.45);
+  const fillLight = new THREE.DirectionalLight(0x9fc4ff, 0.7);
   fillLight.position.set(-BOARD_SIZE * 0.7, -BOARD_SIZE * 0.3, BOARD_SIZE * 0.5);
   scene.add(fillLight);
   scene.add(fillLight.target);
 
+  // Neon accent point lights -- low intensity, short range (distance cutoff
+  // via .distance so they only touch the board area, not the whole scene),
+  // no shadows (accent lights, not a depth cue). Positioned just in front of
+  // the board plane on either side so they catch the cube faces' emissive
+  // highlights without visibly lighting the backdrop behind them.
+  const accentLeft = new THREE.PointLight(0x33e6ff, 6, BOARD_SIZE * 1.6, 2);
+  accentLeft.position.set(-BOARD_SIZE * 0.55, BOARD_SIZE * 0.1, CUBE_HEIGHT * 2);
+  scene.add(accentLeft);
+  const accentRight = new THREE.PointLight(0xff3ec8, 6, BOARD_SIZE * 1.6, 2);
+  accentRight.position.set(BOARD_SIZE * 0.55, -BOARD_SIZE * 0.1, CUBE_HEIGHT * 2);
+  scene.add(accentRight);
+
   // ---- backdrop wall (GDD 4A, corrected 2026-07-28: front-on framing has
   // no floor visible — replaces the old ground/table stub plane with a flat
-  // backdrop wall behind the board plane, facing the camera). Flat
-  // #101114 fill is the fallback/first-paint state; texture-to-material-
-  // mapping swaps it for a tiled brick texture once loaded (matches the
-  // "flat color first, texture appears once ready" pattern the 2D
-  // render-swap workstream established for block cells) -----------------
+  // backdrop wall behind the board plane, facing the camera).
+  // backdrop-cleanup (2026-07-29): retired the tiled brick texture (called
+  // out as "confusing" clutter) in favor of a plain, clean vertical dark
+  // gradient built procedurally on an offscreen canvas -- no network asset,
+  // nothing to fail-and-fallback on, so this is applied synchronously
+  // instead of the old async load-then-swap pattern.
   const backdropGeo = new THREE.PlaneGeometry(BACKDROP_SIZE, BACKDROP_SIZE);
-  const backdropMat = new THREE.MeshStandardMaterial({ color: 0x101114 }); // GDD sec 4 gutter-shadow color, stub/fallback
+  const backdropMat = new THREE.MeshStandardMaterial({ color: 0x101114, roughness: 1, metalness: 0 });
   const ground = new THREE.Mesh(backdropGeo, backdropMat);
   // Upright, facing +Z (toward the camera), sitting behind the board plane.
   ground.position.z = -BACKDROP_DEPTH;
   ground.receiveShadow = true;
   scene.add(ground);
 
-  const textureLoader = new THREE.TextureLoader();
+  function makeBackdropGradientTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 2;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+    // Dark navy-charcoal top fading to near-black bottom -- a "clean neon-
+    // arcade void" rather than a lit wall, so the glowing cubes/mascots read
+    // as the scene's actual focal points against it.
+    const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    grad.addColorStop(0, '#1b1f2c');
+    grad.addColorStop(0.55, '#12141c');
+    grad.addColorStop(1, '#08090c');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+  backdropMat.map = makeBackdropGradientTexture();
+  backdropMat.color.set(0xffffff); // let the gradient texture supply color; a tint would otherwise darken it
+  backdropMat.needsUpdate = true;
+  // No network fetch anymore -- built synchronously above, so this always
+  // resolves true immediately. Kept as a Promise (not a plain boolean) so
+  // existing callers (threeBootstrap.js Promise.all(...), Playwright tests)
+  // that await it keep working unchanged.
   let backdropTextureFailed = false;
-  const backdropTextureLoaded = new Promise((resolve) => {
-    textureLoader.load(
-      BRICK_TEXTURE_PATH,
-      (tex) => {
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.wrapS = THREE.RepeatWrapping;
-        tex.wrapT = THREE.RepeatWrapping;
-        tex.magFilter = THREE.NearestFilter; // pixel-art tile, keep it crisp instead of blurred
-        const repeats = BACKDROP_SIZE / BRICK_TILE_WORLD_SIZE;
-        tex.repeat.set(repeats, repeats);
-        backdropMat.map = tex;
-        backdropMat.color.set(0xffffff); // let the texture supply color; tint would otherwise darken it
-        backdropMat.needsUpdate = true;
-        resolve(true);
-      },
-      undefined,
-      () => {
-        // Fallback: leave backdropMat's flat #101114 fill in place (already
-        // applied above) — same "stays playable, just untextured" contract
-        // render-swap established for the 2D board-cell fallback.
-        backdropTextureFailed = true;
-        resolve(false);
-      }
-    );
-  });
+  const backdropTextureLoaded = Promise.resolve(true);
 
   // ---- 8x8 grid of naive BoxGeometry cubes -------------------------------
   // Deliberately one Mesh per cell (64 meshes), NOT InstancedMesh, per GDD
@@ -317,80 +460,39 @@ export function createThreeScene(container) {
     }
   }
 
-  // ---- per-family block materials (texture-to-material-mapping, extended
-  // by gameplay-state-wiring) ------------------------------------------------
-  // Reuses the SAME assets/blocks/block-map.json + assets/blocks/*.png the
-  // 2D renderer's loadBlockTextures() already established as the single
-  // source of truth for block art (GDD 4A: "reuse assets/blocks/*.png
-  // as-is"), and the SAME FAMILY_BY_COLOR color->family mapping the 2D
-  // renderer uses (src/blockTextureConfig.js) — not a re-derived/duplicated
-  // mapping. `familyByName` lets setBoardState() below look up the right
-  // material for whatever color a real occupied board cell holds, once
-  // materials finish loading (each family's own load resolves to either a
-  // real texture or a flat per-family hex fallback, same "stays playable
-  // either way" contract as the 2D renderer's drawBlockCell()).
+  // ---- per-family NEON block materials (neon-blocks-pass, 2026-07-29) ----
+  // Replaces texture-to-material-mapping's PNG-texture-per-family loader
+  // entirely -- built synchronously, directly from FAMILY_BY_COLOR's own
+  // 7 game-palette hex values (src/blockTextureConfig.js), boosted via
+  // boostSaturation() for the vibrant-color-pass ask, then used as BOTH the
+  // material's base color and its emissive glow so occupied cells actually
+  // read as lit-from-within rather than merely brightly colored. `familyByName`
+  // still keys by family name (not the raw hex) so setBoardState() below and
+  // triggerShardArc()'s existing FAMILY_BY_COLOR lookup didn't need to change
+  // shape -- only what a "family" material IS changed (neon color, not a
+  // loaded texture).
   const familyMaterials = [];
   const familyByName = new Map();
+  for (const [colorHex, familyName] of Object.entries(FAMILY_BY_COLOR)) {
+    const neonColor = boostSaturation(colorHex);
+    const mat = new THREE.MeshStandardMaterial({
+      color: neonColor,
+      emissive: neonColor,
+      emissiveIntensity: NEON_EMISSIVE_INTENSITY,
+      roughness: 0.35,
+      metalness: 0.15,
+    });
+    const entry = { name: familyName, mat };
+    familyMaterials.push(entry);
+    familyByName.set(familyName, entry);
+  }
+  // Nothing here is ever network-dependent anymore, so this always resolves
+  // true/false=failed immediately -- kept as a Promise (not a plain boolean)
+  // purely so existing callers (threeBootstrap.js, Playwright tests) that
+  // await materialsReadyPromise / read isMaterialsFailed() keep working
+  // unchanged.
   let materialsFailed = false;
-  const materialsReadyPromise = (async () => {
-    let mapData;
-    try {
-      const res = await fetch(BLOCK_MAP_PATH);
-      if (!res.ok) throw new Error('block-map fetch failed: ' + res.status);
-      mapData = await res.json();
-    } catch (err) {
-      materialsFailed = true;
-      return false; // leave every cube on placeholderMat — same fallback contract as 2D
-    }
-    const familyNames = Object.keys(mapData.families);
-    await Promise.all(
-      familyNames.map(
-        (name) =>
-          new Promise((resolve) => {
-            const family = mapData.families[name];
-            textureLoader.load(
-              family.individualPath,
-              (tex) => {
-                tex.colorSpace = THREE.SRGBColorSpace;
-                tex.magFilter = THREE.NearestFilter; // pixel-art source, keep crisp
-                tex.generateMipmaps = false;
-                tex.minFilter = THREE.LinearFilter;
-                const entry = { name, mat: new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0.05 }) };
-                familyMaterials.push(entry);
-                familyByName.set(name, entry);
-                resolve(true);
-              },
-              undefined,
-              () => {
-                // Per-family fallback: flat fill using the family's own hex
-                // (still distinct per family, closer to render-swap's own
-                // per-color flat fallback than falling all the way back to
-                // one shared placeholder color would be).
-                const entry = {
-                  name,
-                  mat: new THREE.MeshStandardMaterial({ color: new THREE.Color(family.hex), roughness: 0.85, metalness: 0.05 }),
-                };
-                familyMaterials.push(entry);
-                familyByName.set(name, entry);
-                resolve(false);
-              }
-            );
-          })
-      )
-    );
-    if (familyMaterials.length === 0) {
-      materialsFailed = true;
-      return false;
-    }
-    // No demo assignment anymore (gameplay-state-wiring) — cubes stay hidden
-    // until setBoardState() below is driven by the caller's render loop with
-    // real board state. If setBoardState() already ran once before materials
-    // finished loading (board had cells occupied on first sync, materials
-    // still async), re-apply it now so those cells pick up their real
-    // family instead of staying on the flat placeholder forever.
-    if (lastBoardState) setBoardState(lastBoardState);
-    return true;
-  })();
+  const materialsReadyPromise = Promise.resolve(true);
 
   // ---- live board-state sync (gameplay-state-wiring) ---------------------
   // Reads src/core.js's board grid (rows of either null or {color}) the same
@@ -522,9 +624,36 @@ export function createThreeScene(container) {
             obj.receiveShadow = true;
           }
         });
+        // mascot-head-tilt (2026-07-29): mascots stand facing forward/toward
+        // the camera (unchanged -- per the brief, this is a HEAD-only pose
+        // offset, not a whole-body reorientation toward the board). Look for
+        // a bone literally named "Head" (confirmed present on all 4 source
+        // gltfs) and pitch it upward a fixed amount so they read as looking
+        // up at the grid above them; a static pose offset applied once after
+        // load, not animated, and applied BEFORE the idle mixer/action below
+        // starts playing so it composes as the skeleton's new rest pose that
+        // the Idle clip's own (unrelated) bone rotations layer on top of.
+        let headBone = null;
+        root.traverse((obj) => {
+          if (!headBone && obj.isBone && obj.name === 'Head') headBone = obj;
+        });
+        if (headBone) {
+          // Small upward pitch around the bone's local X axis. All 4 rigs
+          // share the same Quaternius convention (confirmed via the bone
+          // quaternion snapshots taken during mascot-idle-animation's own
+          // verification pass), so one fixed angle reads correctly on all of
+          // them without a per-mascot fudge factor.
+          headBone.rotateX(-0.35);
+        } else {
+          // Fallback for any mascot whose rig doesn't expose a separable
+          // Head bone -- tilt the whole model back slightly instead of
+          // skipping the "looking up" pose entirely.
+          root.rotation.x = 0.12;
+        }
         scene.add(root);
-        const entry = { name: cfg.url.split('/').pop().replace('.gltf', ''), root };
+        const entry = { name: cfg.url.split('/').pop().replace('.gltf', ''), root, clips: [], actions: {}, activeAction: null, activeActionName: null, mixer: null };
         const clips = gltf.animations || [];
+        entry.clips = clips;
         if (clips.length) {
           const mixer = new THREE.AnimationMixer(root);
           // Prefer an 'Idle' clip by name (case-insensitive); fall back to
@@ -534,9 +663,28 @@ export function createThreeScene(container) {
             clips.find((c) => /idle/i.test(c.name)) || clips[0];
           const action = mixer.clipAction(idleClip);
           action.setLoop(THREE.LoopRepeat, Infinity);
+          action.setEffectiveWeight(1);
           action.play();
           entry.mixer = mixer;
           entry.idleClipName = idleClip.name;
+          entry.actions[idleClip.name] = action;
+          entry.actions.Idle = entry.actions.Idle || action; // alias so getAction(entry,'Idle') always resolves even if the real clip name differs
+          entry.activeAction = action;
+          entry.activeActionName = idleClip.name;
+          // mascot-reactions: fires when any LoopOnce reaction action this
+          // mascot plays finishes, fading back to its own idle clip. One
+          // listener per mixer (not per-action) -- mixer 'finished' events
+          // fire for ANY action on that mixer, so the guards below only act
+          // when the finished action is this mascot's CURRENT action (guards
+          // against a stale/superseded reaction's own late 'finished' event
+          // stomping on a newer one) and skip entirely if it's somehow the
+          // idle clip itself (defensive only -- Idle is always LoopRepeat,
+          // which never fires 'finished').
+          mixer.addEventListener('finished', (e) => {
+            if (e.action !== entry.activeAction) return;
+            if (e.action === entry.actions[entry.idleClipName]) return;
+            fadeToAction(entry, entry.idleClipName, 0.3, false);
+          });
           mascotMixers.push(mixer);
         }
         mascots.push(entry);
@@ -544,6 +692,71 @@ export function createThreeScene(container) {
       })
     )
   );
+
+  // ---- mascot-reactions (2026-07-29) -------------------------------------
+  // getAction()/fadeToAction() follow three.js's own documented multi-clip
+  // crossfade pattern (fadeOut the previous action, fadeIn + play the next),
+  // rather than clipAction.crossFadeTo -- that pattern needs both actions
+  // already "playing" with one at zero weight, which is more bookkeeping for
+  // no behavior difference here since every mascot only ever has ONE action
+  // active at a time (idle, or a reaction).
+  function getAction(entry, name) {
+    if (!entry.mixer) return null;
+    if (entry.actions[name]) return entry.actions[name];
+    const clip = entry.clips.find((c) => c.name === name);
+    if (!clip) return null;
+    const action = entry.mixer.clipAction(clip);
+    entry.actions[name] = action;
+    return action;
+  }
+  function fadeToAction(entry, name, duration = 0.2, loopOnce = false) {
+    const next = getAction(entry, name);
+    if (!next) return;
+    if (next === entry.activeAction) {
+      // Already playing this clip (e.g. a second reaction request lands
+      // while the first is still fading back to idle) -- restart it from
+      // the top rather than no-op, so a rapid-fire combo still visibly
+      // re-triggers the reaction instead of doing nothing.
+      next.reset();
+    }
+    if (loopOnce) {
+      next.setLoop(THREE.LoopOnce, 1);
+      next.clampWhenFinished = true;
+    } else {
+      next.setLoop(THREE.LoopRepeat, Infinity);
+      next.clampWhenFinished = false;
+    }
+    next.reset().setEffectiveTimeScale(1).setEffectiveWeight(1).fadeIn(duration).play();
+    const prev = entry.activeAction;
+    if (prev && prev !== next) prev.fadeOut(duration);
+    entry.activeAction = next;
+    entry.activeActionName = name;
+  }
+  // Small rotation through the 4 mascots for normal (non-big) clears, so
+  // repeated small clears don't always react on the exact same mascot.
+  let reactRotor = 0;
+  function isPetMascot(entry) {
+    return entry.name === 'Dog' || entry.name === 'Cat';
+  }
+  function triggerMascotReact(lineCount, bigClear) {
+    if (!lineCount || lineCount <= 0) return;
+    const big = !!bigClear || lineCount >= 3;
+    if (big) {
+      // Bigger/more emphatic reaction: ALL FOUR mascots react at once, with
+      // a more energetic clip than the small-clear case (humans: 'Yes'
+      // instead of 'Wave'; pets: 'Jump_Start' instead of 'Headbutt').
+      for (const entry of mascots) {
+        if (!entry.mixer) continue;
+        fadeToAction(entry, isPetMascot(entry) ? 'Jump_Start' : 'Yes', 0.12, true);
+      }
+    } else if (mascots.length) {
+      const entry = mascots[reactRotor % mascots.length];
+      reactRotor++;
+      if (entry && entry.mixer) {
+        fadeToAction(entry, isPetMascot(entry) ? 'Headbutt' : 'Wave', 0.15, true);
+      }
+    }
+  }
 
   // ---- input-raycasting (workstream: input-raycasting) ------------------
   // Pointer-driven drag/drop lives in src/threeBootstrap.js (DOM tray slots
@@ -692,10 +905,13 @@ export function createThreeScene(container) {
     const slowFactor = bigClear ? 1.8 : 1;
     const familyName = FAMILY_BY_COLOR[colorHex] || null;
     const famEntry = familyName ? familyByName.get(familyName) : null;
+    // neon-blocks-pass: family materials no longer carry a .map (PNG texture
+    // retired) -- tint the chip with the family's own boosted neon color
+    // (its MeshStandardMaterial.color) instead of the old "white base +
+    // texture supplies the actual color" trick.
     for (const target of targetsWorld) {
       const mat = new THREE.MeshBasicMaterial({
-        color: famEntry ? 0xffffff : new THREE.Color(colorHex),
-        map: famEntry ? famEntry.mat.map : null,
+        color: famEntry ? famEntry.mat.color : new THREE.Color(colorHex),
         transparent: true,
       });
       const mesh = new THREE.Mesh(shardChipGeo, mat);
@@ -733,6 +949,109 @@ export function createThreeScene(container) {
         a.mesh.scale.set(scale, scale, 1);
         a.mesh.material.opacity = Math.max(0, 1 - st);
       }
+    }
+  }
+
+  // ---- break-effect-pass (2026-07-29): shatter burst on line clear ------
+  // triggerShardArc above already flies one chip PER SHARD-QUEUE-SLOT from
+  // the cleared line toward the queue -- but that's a queue-bound projectile,
+  // not a "this cube just broke" moment at the cell itself. This adds a
+  // separate, purely-cosmetic burst per CLEARED CELL (not per queue target):
+  // a quick bright flash quad over the cell plus a handful of small chip
+  // fragments that scatter outward and shrink/fade, both driven by the same
+  // vnow()-based pause-safe timing every other juice effect here uses. Reuses
+  // shardChipGeo (already declared above) for the fragments instead of a new
+  // geometry -- cheap, and visually consistent with the shard-arc chips.
+  const BREAK_FLASH_MS = 140;
+  const BREAK_FRAGMENT_MS = 260;
+  const BREAK_FRAGMENTS_PER_CELL = 5;
+  const BREAK_FRAGMENT_SPEED_MIN = 1.1; // world units/sec
+  const BREAK_FRAGMENT_SPEED_MAX = 2.2;
+  const breakFlashGeo = new THREE.PlaneGeometry(CUBE_FOOTPRINT, CUBE_FOOTPRINT);
+  const breakFlashes = []; // { mesh, startedAt }
+  const breakFragments = []; // { mesh, startedAt, vx, vy }
+  function triggerBreakEffect(rows, cols, colorHex) {
+    const now = vnow();
+    const familyName = FAMILY_BY_COLOR[colorHex] || null;
+    const famEntry = familyName ? familyByName.get(familyName) : null;
+    const color = famEntry ? famEntry.mat.color : new THREE.Color(colorHex);
+    // Union of every cell in the cleared rows/cols (a row contributes all 8
+    // columns, a col contributes all 8 rows; intersections deduped) -- same
+    // "which cells actually cleared" set the 2D renderer's own line-clear
+    // sweep would touch, just derived here instead of threaded through the
+    // hook payload as a third parallel list.
+    const seen = new Set();
+    const cellsList = [];
+    const addCell = (r, c) => {
+      const key = `${r},${c}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      cellsList.push([r, c]);
+    };
+    for (const r of rows) for (let c = 0; c < BOARD_SIZE; c++) addCell(r, c);
+    for (const c of cols) for (let r = 0; r < BOARD_SIZE; r++) addCell(r, c);
+    for (const [r, c] of cellsList) {
+      const cx = (c - BOARD_HALF) * CELL_STRIDE;
+      const cy = (BOARD_HALF - r) * CELL_STRIDE;
+      const flashMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.95, depthWrite: false });
+      const flashMesh = new THREE.Mesh(breakFlashGeo, flashMat);
+      flashMesh.position.set(cx, cy, CUBE_HEIGHT + 0.1);
+      scene.add(flashMesh);
+      breakFlashes.push({ mesh: flashMesh, startedAt: now });
+      for (let i = 0; i < BREAK_FRAGMENTS_PER_CELL; i++) {
+        const mat = new THREE.MeshBasicMaterial({ color, transparent: true });
+        const mesh = new THREE.Mesh(shardChipGeo, mat);
+        mesh.position.set(cx, cy, CUBE_HEIGHT + 0.06);
+        scene.add(mesh);
+        const angle = Math.random() * Math.PI * 2;
+        const speed = BREAK_FRAGMENT_SPEED_MIN + Math.random() * (BREAK_FRAGMENT_SPEED_MAX - BREAK_FRAGMENT_SPEED_MIN);
+        breakFragments.push({
+          mesh,
+          startedAt: now,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+        });
+      }
+    }
+  }
+  function updateBreakEffect(now) {
+    for (let i = breakFlashes.length - 1; i >= 0; i--) {
+      const f = breakFlashes[i];
+      const elapsed = now - f.startedAt;
+      if (elapsed >= BREAK_FLASH_MS) {
+        scene.remove(f.mesh);
+        f.mesh.material.dispose();
+        breakFlashes.splice(i, 1);
+        continue;
+      }
+      const t = elapsed / BREAK_FLASH_MS;
+      const scale = 1 + t * 0.5; // quick outward pop
+      f.mesh.scale.set(scale, scale, 1);
+      f.mesh.material.opacity = 0.95 * (1 - t);
+    }
+    for (let i = breakFragments.length - 1; i >= 0; i--) {
+      const a = breakFragments[i];
+      const elapsed = now - a.startedAt;
+      if (elapsed >= BREAK_FRAGMENT_MS) {
+        scene.remove(a.mesh);
+        a.mesh.material.dispose();
+        breakFragments.splice(i, 1);
+        continue;
+      }
+      const t = elapsed / BREAK_FRAGMENT_MS;
+      const dtSec = elapsed / 1000;
+      // Position is recomputed from a cached origin + velocity*elapsed each
+      // frame (not integrated incrementally) so it stays exact regardless of
+      // frame timing jitter -- origin is cached on first update since the
+      // fragment's spawn position (set in triggerBreakEffect) is itself the
+      // origin, just not stored under this name yet.
+      const originX = a.mesh.userData.originX ?? (a.mesh.userData.originX = a.mesh.position.x);
+      const originY = a.mesh.userData.originY ?? (a.mesh.userData.originY = a.mesh.position.y);
+      a.mesh.position.x = originX + a.vx * dtSec;
+      a.mesh.position.y = originY + a.vy * dtSec;
+      const scale = Math.max(0.05, 1 - t);
+      a.mesh.scale.set(scale, scale, 1);
+      a.mesh.material.opacity = 1 - t;
     }
   }
 
@@ -838,15 +1157,27 @@ export function createThreeScene(container) {
   }
 
   function resize(width, height) {
+    // scene-layout-cleanup: asymmetric top/bottom (FRUSTUM_TOP_WORLD /
+    // FRUSTUM_BOTTOM_WORLD, computed near the top of this file) replace the
+    // old single symmetric halfExtent -- see that block's comment for why.
+    // Horizontal half-extent is derived from the SAME total vertical world
+    // span (not an independent value) so world-units-per-pixel stays equal
+    // on both axes regardless of container aspect -- an asymmetric top/
+    // bottom paired with an unrelated left/right span would otherwise
+    // squash or stretch every cube non-uniformly.
     const aspect = width / Math.max(1, height);
-    const halfExtent = (BOARD_SIZE / 2 + 0.5) * FRUSTUM_MARGIN;
-    camera.left = -halfExtent * aspect;
-    camera.right = halfExtent * aspect;
-    camera.top = halfExtent;
-    camera.bottom = -halfExtent;
+    const halfHorizontal = (TOTAL_WORLD_HEIGHT * aspect) / 2;
+    camera.left = -halfHorizontal;
+    camera.right = halfHorizontal;
+    camera.top = FRUSTUM_TOP_WORLD;
+    camera.bottom = FRUSTUM_BOTTOM_WORLD;
     camera.updateProjectionMatrix();
     renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    renderer.setPixelRatio(pixelRatio);
+    composer.setSize(width, height);
+    composer.setPixelRatio(pixelRatio);
+    bloomPass.setSize(width, height);
   }
 
   // mascot-idle-animation: last vnow() render() saw, used to derive a
@@ -865,6 +1196,7 @@ export function createThreeScene(container) {
     const now = vnow();
     updateLandingAnims(now);
     updateShardArcs(now);
+    updateBreakEffect(now);
     updateGoldFlash(now);
     updateZoomAndShake(now);
     updateCubeVisuals(now);
@@ -876,7 +1208,9 @@ export function createThreeScene(container) {
       for (const mixer of mascotMixers) mixer.update(deltaSec);
     }
     if (isDeathFreezeActive(now)) return; // GDD 12.8 freeze-frame: skip this render call entirely, same as main.js's draw()-skip
-    renderer.render(scene, camera);
+    // neon-blocks-pass: composer.render() (RenderPass+UnrealBloomPass+
+    // OutputPass) replaces the old direct renderer.render(scene, camera).
+    composer.render();
   }
 
   function dispose() {
@@ -894,6 +1228,15 @@ export function createThreeScene(container) {
       scene.remove(a.mesh);
       a.mesh.material.dispose();
     }
+    for (const f of breakFlashes) {
+      scene.remove(f.mesh);
+      f.mesh.material.dispose();
+    }
+    for (const a of breakFragments) {
+      scene.remove(a.mesh);
+      a.mesh.material.dispose();
+    }
+    breakFlashGeo.dispose();
     shardChipGeo.dispose();
     goldFlashGeo.dispose();
     goldFlashMat.dispose();
@@ -905,6 +1248,8 @@ export function createThreeScene(container) {
     previewGeo.dispose();
     previewMatValid.dispose();
     previewMatInvalid.dispose();
+    composer.dispose();
+    bloomPass.dispose();
     renderer.dispose();
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
   }
@@ -944,9 +1289,15 @@ export function createThreeScene(container) {
     triggerGoldFlash,
     triggerZoomPulse,
     triggerDeathSequence,
+    // break-effect-pass addition:
+    triggerBreakEffect,
+    // mascot-reactions addition:
+    triggerMascotReact,
     // verification-only getters (window.__threeDebug wires these up):
     landingAnimCount: () => landingAnims.size,
     shardArcCount: () => shardArcs.length,
+    breakFragmentCount: () => breakFragments.length,
+    isBreakEffectActive: () => breakFragments.length > 0 || breakFlashes.length > 0,
     isGoldFlashActive: () => !!goldFlash,
     isZoomPulseActive: () => !!zoomPulse,
     isDeathSequenceActive: () => !!deathSeq,
@@ -955,6 +1306,10 @@ export function createThreeScene(container) {
     cubeColor: (r, c) => {
       const entry = cubes.find((e) => e.r === r && e.c === c);
       return entry && entry.ownMaterial ? entry.ownMaterial.color.getHexString() : null;
+    },
+    mascotActiveClip: (name) => {
+      const entry = mascots.find((m) => m.name === name);
+      return entry && entry.activeActionName ? entry.activeActionName : null;
     },
   };
 }

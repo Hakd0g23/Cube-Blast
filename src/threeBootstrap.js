@@ -359,6 +359,17 @@ if (THREE_PREVIEW) {
     window.__threeJuiceHooks = {
       onPlacement(payload) {
         handle.triggerLandingAnim(payload.cells, payload.r0, payload.c0);
+        if (payload.lineCount > 0) {
+          // break-effect-pass: the per-cell shatter burst fires for EVERY
+          // clear, independent of whether any shard actually got queued
+          // (payload.newlyQueued can be 0 -- e.g. an overflow shard skipped
+          // the queue straight into the tray) -- it's cosmetic feedback on
+          // the cells themselves, not tied to the queue-arc mechanic below.
+          handle.triggerBreakEffect(payload.rows, payload.cols, payload.color);
+          // mascot-reactions: same "any real clear" gate: humanoids/pets
+          // react to a small clear, all four react bigger on a combo/bigClear.
+          handle.triggerMascotReact(payload.lineCount, payload.bigClear);
+        }
         if (payload.lineCount > 0 && payload.newlyQueued > 0) {
           // Force the DOM queue-slot overlay to reflect the just-committed
           // state BEFORE reading its slot positions -- this hook fires
@@ -438,6 +449,12 @@ if (THREE_PREVIEW) {
       boardGroupScale: () => handle.boardGroupScale(),
       boardGroupPosition: () => handle.boardGroupPosition(),
       cubeColor: (r, c) => handle.cubeColor(r, c),
+      // break-effect-pass additions:
+      breakFragmentCount: () => handle.breakFragmentCount(),
+      isBreakEffectActive: () => handle.isBreakEffectActive(),
+      // mascot-reactions additions:
+      mascotActiveClip: (name) => handle.mascotActiveClip(name),
+      triggerMascotReact: (lineCount, bigClear) => handle.triggerMascotReact(lineCount, bigClear),
     };
   }
 }
