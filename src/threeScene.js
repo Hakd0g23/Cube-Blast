@@ -398,6 +398,81 @@ export function createThreeScene(container) {
     )
   );
 
+  // ---- input-raycasting (workstream: input-raycasting) ------------------
+  // Pointer-driven drag/drop lives in src/threeBootstrap.js (DOM tray slots
+  // are the drag *source*), but "where would this land on the board" is a
+  // 3D-scene question -- raycast the pointer against the board's flat XY
+  // plane (z=0, same plane every cube's face-center sits just in front of)
+  // rather than mesh-picking the thin cube fronts, per the brief. A plane
+  // intersection is robust regardless of z (cube thickness) or whether a
+  // given cell is currently visible/occupied.
+  const raycaster = new THREE.Raycaster();
+  const boardPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  function pointerToBoardXY(clientX, clientY) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+    raycaster.setFromCamera(ndc, camera);
+    const point = new THREE.Vector3();
+    const hit = raycaster.ray.intersectPlane(boardPlane, point);
+    return hit ? { x: point.x, y: point.y } : null;
+  }
+
+  // Inverts the same cell-center formula used to position cube meshes above
+  // ((c - BOARD_HALF) * CELL_STRIDE, (BOARD_HALF - r) * CELL_STRIDE) to find
+  // the shape's top-left anchor (r0, c0) given the WORLD-space point the
+  // piece's own bounding-box center should sit at -- mirrors src/main.js's
+  // dragTargetCell() px-space math, just in continuous world units instead
+  // of canvas pixels (1 world unit == 1 board cell, by construction above).
+  const BOARD_EDGE = BOARD_HALF + CELL_STRIDE / 2;
+  function cellAnchorFromWorld(x, y, ext) {
+    const c0 = Math.round(x + BOARD_EDGE - (ext.cols * CELL_STRIDE) / 2);
+    const r0 = Math.round(BOARD_EDGE - y - (ext.rows * CELL_STRIDE) / 2);
+    return { r: r0, c: c0 };
+  }
+
+  // Placement preview: a small pool of translucent boxes (reused across
+  // drags, not allocated per-frame) sitting just in front of the cube faces.
+  // Simple overlay-mesh approach per the brief's "your call on simplest
+  // correct approach" -- avoids mutating the real per-family cube materials
+  // (which would have to be restored exactly afterward, more bookkeeping for
+  // no visual benefit over a dedicated highlight layer).
+  const MAX_PREVIEW_CELLS = 9; // largest defined piece (SHAPES 'square3', pieces.js) has 9 cells
+  const previewGeo = new THREE.BoxGeometry(CUBE_FOOTPRINT, CUBE_FOOTPRINT, CUBE_HEIGHT * 0.15);
+  const previewMatValid = new THREE.MeshBasicMaterial({ color: 0x2ecc71, transparent: true, opacity: 0.55, depthWrite: false });
+  const previewMatInvalid = new THREE.MeshBasicMaterial({ color: 0xe74c3c, transparent: true, opacity: 0.55, depthWrite: false });
+  const previewMeshes = [];
+  for (let i = 0; i < MAX_PREVIEW_CELLS; i++) {
+    const mesh = new THREE.Mesh(previewGeo, previewMatValid);
+    mesh.position.z = CUBE_HEIGHT + 0.06; // just in front of every cube face, always visible
+    mesh.visible = false;
+    scene.add(mesh);
+    previewMeshes.push(mesh);
+  }
+
+  function setPlacementPreview(shapeCells, r0, c0, valid) {
+    const mat = valid ? previewMatValid : previewMatInvalid;
+    let i = 0;
+    for (; i < shapeCells.length && i < previewMeshes.length; i++) {
+      const [dr, dc] = shapeCells[i];
+      const r = r0 + dr;
+      const c = c0 + dc;
+      const mesh = previewMeshes[i];
+      mesh.material = mat;
+      mesh.position.x = (c - BOARD_HALF) * CELL_STRIDE;
+      mesh.position.y = (BOARD_HALF - r) * CELL_STRIDE;
+      mesh.visible = true;
+    }
+    for (; i < previewMeshes.length; i++) previewMeshes[i].visible = false;
+  }
+
+  function clearPlacementPreview() {
+    for (const mesh of previewMeshes) mesh.visible = false;
+  }
+
   function resize(width, height) {
     const aspect = width / Math.max(1, height);
     const halfExtent = (BOARD_SIZE / 2 + 0.5) * FRUSTUM_MARGIN;
@@ -426,6 +501,9 @@ export function createThreeScene(container) {
     backdropMat.dispose();
     ledgeGeo.dispose();
     ledgeMat.dispose();
+    previewGeo.dispose();
+    previewMatValid.dispose();
+    previewMatInvalid.dispose();
     renderer.dispose();
     if (renderer.domElement.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
   }
@@ -445,6 +523,13 @@ export function createThreeScene(container) {
     render,
     dispose,
     setBoardState,
+    // input-raycasting additions:
+    pointerToBoardXY,
+    cellAnchorFromWorld,
+    setPlacementPreview,
+    clearPlacementPreview,
+    previewMeshes,
+    boardHalf: BOARD_HALF,
     materialsReadyPromise,
     backdropTextureLoaded,
     isMaterialsFailed: () => materialsFailed,

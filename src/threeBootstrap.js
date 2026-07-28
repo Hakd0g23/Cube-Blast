@@ -7,7 +7,7 @@
 // texture-mapping/mascot/UI-integration workstreams to land first just to
 // avoid regressing the live game.
 import { createThreeScene } from './threeScene.js';
-import { QUEUE_CAP } from './core.js';
+import { QUEUE_CAP, canPlaceAt } from './core.js';
 
 const THREE_PREVIEW = new URLSearchParams(location.search).has('three');
 
@@ -77,6 +77,59 @@ function renderTrayQueueOverlay(state) {
     traySlots.appendChild(slot);
   }
 }
+// ---- input-raycasting (2026-07-28) ----------------------------------------
+// Pointer-driven drag/drop against the live 3D scene. Pickup ORIGINATES on a
+// DOM tray slot (#three-tray-slots, delegated so it survives the per-frame
+// innerHTML rebuild renderTrayQueueOverlay does above) -- per the brief,
+// this is a hybrid DOM-source/3D-target interaction, not a fully DOM drag or
+// fully in-scene drag. Move/preview/drop-target detection raycasts against
+// the 3D board plane (handle.pointerToBoardXY/cellAnchorFromWorld,
+// src/threeScene.js) instead of reusing any 2D canvas-space math. Commit
+// goes through window.__fractureDebug.placePiece(), the SAME
+// performPlacement()->core.js placePiece() path real 2D pointer-drag input
+// and the debug hook both already use (see gameplay-state-wiring notes,
+// progress.md) -- no placement rule is reimplemented here; canPlaceAt() is
+// used ONLY for the live green/red preview color, and placePiece() itself is
+// the sole source of truth for whether a placement actually commits (it's
+// already a safe no-op returning {ok:false} on an invalid target, so a
+// stale/race-y anchor computed here can never corrupt state).
+let threeDrag = null; // { trayIndex, piece, slotEl, anchor, valid }
+let floatingPieceEl = null;
+
+function updateFloatingPiece(clientX, clientY, piece) {
+  if (!floatingPieceEl) {
+    floatingPieceEl = document.createElement('div');
+    floatingPieceEl.id = 'three-drag-floating-piece';
+    document.body.appendChild(floatingPieceEl);
+  }
+  const ext = shapeExtent(piece.shape);
+  floatingPieceEl.style.gridTemplateColumns = `repeat(${ext.cols}, 1fr)`;
+  floatingPieceEl.style.gridTemplateRows = `repeat(${ext.rows}, 1fr)`;
+  floatingPieceEl.innerHTML = '';
+  for (const [r, c] of piece.shape) {
+    const cell = document.createElement('div');
+    cell.className = 'three-piece-cell';
+    cell.style.gridColumn = String(c + 1);
+    cell.style.gridRow = String(r + 1);
+    cell.style.background = piece.color;
+    floatingPieceEl.appendChild(cell);
+  }
+  // Centered on the pointer, lifted up a bit so touch input isn't hidden
+  // under the player's own finger -- same "lift above the touch point"
+  // intent as src/main.js's TOUCH_VISUAL_LIFT for the 2D drag, applied
+  // unconditionally here since this floating element is always separate
+  // from the pointer itself (mouse or touch alike).
+  floatingPieceEl.style.left = (clientX - 36) + 'px';
+  floatingPieceEl.style.top = (clientY - 36 - 46) + 'px';
+}
+
+function removeFloatingPiece() {
+  if (floatingPieceEl) {
+    floatingPieceEl.remove();
+    floatingPieceEl = null;
+  }
+}
+
 if (THREE_PREVIEW) {
   const stage2D = document.getElementById('stage');
   const wrap = document.getElementById('three-stage-wrap');
@@ -126,6 +179,102 @@ if (THREE_PREVIEW) {
     }
     requestAnimationFrame(loop);
 
+    // ---- input-raycasting: drag lifecycle ---------------------------------
+    const traySlots = document.getElementById('three-tray-slots');
+
+    function trayIndexOfSlot(slotEl) {
+      return Array.prototype.indexOf.call(traySlots.children, slotEl);
+    }
+
+    function updateDragPreview(clientX, clientY) {
+      if (!threeDrag) return;
+      const world = handle.pointerToBoardXY(clientX, clientY);
+      if (!world) {
+        threeDrag.anchor = null;
+        handle.clearPlacementPreview();
+        return;
+      }
+      const ext = shapeExtent(threeDrag.piece.shape);
+      const anchor = handle.cellAnchorFromWorld(world.x, world.y, ext);
+      const debug = window.__fractureDebug;
+      const state = debug ? debug.getState() : null;
+      const valid = !!state && canPlaceAt(state.board, threeDrag.piece.shape, anchor.r, anchor.c);
+      threeDrag.anchor = anchor;
+      threeDrag.valid = valid;
+      handle.setPlacementPreview(threeDrag.piece.shape, anchor.r, anchor.c, valid);
+    }
+
+    function startDrag(e, slotEl) {
+      const debug = window.__fractureDebug;
+      if (!debug) return;
+      const state = debug.getState();
+      if (state.gameOver || debug.isPaused()) return; // matches 2D pointerdown's own guards
+      const idx = trayIndexOfSlot(slotEl);
+      const piece = state.tray[idx];
+      if (idx < 0 || !piece) return;
+      threeDrag = { trayIndex: idx, piece, slotEl, anchor: null, valid: false };
+      slotEl.classList.add('three-drag-source');
+      updateFloatingPiece(e.clientX, e.clientY, piece);
+      updateDragPreview(e.clientX, e.clientY);
+      e.preventDefault();
+    }
+
+    function endDrag() {
+      if (!threeDrag) return;
+      const { trayIndex, anchor, valid, slotEl } = threeDrag;
+      threeDrag = null;
+      slotEl.classList.remove('three-drag-source');
+      handle.clearPlacementPreview();
+      removeFloatingPiece();
+      const debug = window.__fractureDebug;
+      // Commit via the SAME performPlacement()/core.js placePiece() path the
+      // 2D canvas drag and the existing debug hook both use -- placePiece()
+      // itself is the single source of truth for validity (it safely no-ops
+      // on an out-of-bounds/occupied target), the `valid`/`anchor` computed
+      // during the drag are only used to decide whether it's worth calling
+      // at all (an anchor that went off-plane, e.g. pointerup outside the
+      // canvas entirely, never reaches core.js).
+      if (debug && anchor && valid) debug.placePiece(trayIndex, anchor.r, anchor.c);
+      syncFromGameState();
+    }
+
+    // Pickup: delegated on the stable #three-tray-slots container so it
+    // survives renderTrayQueueOverlay's per-frame innerHTML rebuild of its
+    // children (see comment above traySlots' declaration).
+    traySlots.addEventListener('pointerdown', (e) => {
+      const slotEl = e.target.closest('.three-tray-slot');
+      if (!slotEl || slotEl.classList.contains('dashed')) return;
+      startDrag(e, slotEl);
+    });
+
+    // Move/release/cancel are tracked at window level, not on the tray slot
+    // or the canvas alone -- the drag needs to keep tracking the pointer
+    // across both (over the tray on pickup, over the 3D canvas mid-drag,
+    // possibly back off either edge), and pointer capture on a DOM element
+    // that itself gets destroyed/rebuilt mid-drag (the tray slot does, every
+    // frame) would silently drop capture. window-level listeners sidestep
+    // that entirely. Pointer events (not separate mouse/touch handlers) work
+    // identically for `pointerType: 'mouse'` and `'touch'`.
+    window.addEventListener('pointermove', (e) => {
+      if (!threeDrag) return;
+      updateFloatingPiece(e.clientX, e.clientY, threeDrag.piece);
+      updateDragPreview(e.clientX, e.clientY);
+    });
+    window.addEventListener('pointerup', (e) => {
+      if (!threeDrag) return;
+      // Re-sample the anchor from the release position itself (matches the
+      // 2D endDrag's own "re-sample from the pointerup event" precedent —
+      // see src/main.js's endDrag comment) rather than trusting whatever the
+      // last pointermove left behind.
+      updateDragPreview(e.clientX, e.clientY);
+      endDrag();
+    });
+    window.addEventListener('pointercancel', () => {
+      if (!threeDrag) return;
+      threeDrag.anchor = null;
+      endDrag();
+    });
+
     // Verification/QA hook, matching the existing window.__fractureDebug
     // pattern (src/main.js) so headless/windowed Playwright scripts can
     // assert on scene contents without scraping internals ad hoc.
@@ -168,6 +317,11 @@ if (THREE_PREVIEW) {
       queueOverlaySlotCount: () => document.querySelectorAll('#three-queue-slots .three-slot').length,
       trayOverlaySlotCount: () => document.querySelectorAll('#three-tray-slots .three-slot').length,
       trayOverlayFilledCount: () => document.querySelectorAll('#three-tray-slots .three-slot:not(.dashed)').length,
+      // input-raycasting additions:
+      isDragging: () => !!threeDrag,
+      dragAnchor: () => (threeDrag ? { r: threeDrag.anchor?.r, c: threeDrag.anchor?.c, valid: threeDrag.valid } : null),
+      previewVisibleCount: () => handle.previewMeshes.filter((m) => m.visible).length,
+      floatingPieceVisible: () => !!document.getElementById('three-drag-floating-piece'),
     };
   }
 }

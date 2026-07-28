@@ -199,11 +199,26 @@
   }
   .three-slot.dashed { border-style: dashed; background: transparent; }
   .three-queue-slot { width: 13%; aspect-ratio: 1 / 1; max-width: 46px; }
-  .three-tray-slot { width: 20%; aspect-ratio: 96 / 86; max-width: 96px; }
+  /* input-raycasting: tray slots are the drag SOURCE (pointerdown originates
+     here, per the brief's "hybrid DOM-source/3D-target" design) -- override
+     the #three-ui-overlay container's pointer-events:none back to auto on
+     just the tray slots themselves. Queue slots stay non-interactive
+     (nothing is ever picked up from the shard queue). */
+  .three-tray-slot { width: 20%; aspect-ratio: 96 / 86; max-width: 96px; pointer-events: auto; }
+  .three-tray-slot:not(.dashed) { cursor: grab; }
+  .three-tray-slot.three-drag-source { opacity: 0.35; }
   .three-piece-mini {
     display: grid; gap: 2px; width: 70%; height: 70%;
   }
   .three-piece-cell { border-radius: 2px; }
+  /* input-raycasting: floating drag-preview piece, follows the pointer
+     between pickup and drop -- fixed-position DOM element appended to
+     <body> (not the overlay, so it isn't clipped by #three-stage-wrap's
+     bounds while dragging near/past its edges). */
+  #three-drag-floating-piece {
+    position: fixed; width: 72px; height: 72px; pointer-events: none;
+    z-index: 9999; opacity: 0.92; display: grid; gap: 2px;
+  }
   #overlay h2 { margin: 0; font-size: 22px; color: var(--fg); }
   #bestDelta { font-size: 13px; color: var(--muted); }
   #bestDelta.new-best { color: var(--accent); font-weight: 600; }
