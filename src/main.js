@@ -153,11 +153,39 @@ function writePlayerName(name) {
   try { localStorage.setItem(LS_KEY_PLAYER_NAME, name); } catch { /* ignore (private mode, etc.) */ }
 }
 
+// GDD 15: local top-10 fallback for offline/no-Supabase play, so the sidebar
+// leaderboard still has real persistent content when the online one isn't
+// configured or reachable. Key name is dictated by the GDD verbatim.
+const LS_KEY_LOCAL_HIGHSCORES = 'fracture-cubeworld-highscores';
+
+function readLocalHighScores() {
+  try {
+    const raw = localStorage.getItem(LS_KEY_LOCAL_HIGHSCORES);
+    const list = raw == null ? [] : JSON.parse(raw);
+    return Array.isArray(list) ? list : [];
+  } catch { return []; }
+}
+function writeLocalHighScores(list) {
+  try { localStorage.setItem(LS_KEY_LOCAL_HIGHSCORES, JSON.stringify(list)); } catch { /* ignore (private mode, etc.) */ }
+}
+// Insert-sorted (desc by score), capped at 10 -- called once per game-over
+// alongside writeBestScore, from the same call site.
+function recordLocalHighScore(name, score) {
+  const list = readLocalHighScores();
+  list.push({ name: name || 'Player', score, date: new Date().toISOString() });
+  list.sort((a, b) => b.score - a.score);
+  list.length = Math.min(list.length, 10);
+  writeLocalHighScores(list);
+}
+
 let bestScore = readBestScore();
 // True only for the single game in which the best score was actually beaten
 // -- drives the game-over overlay's "New Best!" vs "X short of best" text
 // (task 5), reset every newGame().
 let beatBestThisGame = false;
+// Guards recordLocalHighScore against firing more than once per game (same
+// shape as deathSequenceStarted below); reset per newGame().
+let localHighScoreRecordedThisGame = false;
 // GDD 12.8: guards triggerDeathSequence against firing more than once per
 // game (see refreshChrome); reset per newGame() below.
 let deathSequenceStarted = false;
@@ -1502,6 +1530,14 @@ function refreshChrome() {
   }
   bestVal.textContent = bestScore;
   if (state.gameOver) {
+    // Local top-10 fallback (GDD 15): record once per game-over, same call
+    // site as writeBestScore above, using the same name source the online
+    // submit button reads (readPlayerName/nameInput).
+    if (!localHighScoreRecordedThisGame) {
+      localHighScoreRecordedThisGame = true;
+      recordLocalHighScore(readPlayerName(), state.score);
+      renderLeaderboard();
+    }
     finalScoreEl.textContent = `Final score: ${state.score}`;
     if (beatBestThisGame) {
       bestDeltaEl.textContent = 'New Best!';
@@ -1559,6 +1595,7 @@ function newGame() {
   deathSequenceStarted = false;
   lastMilestoneReached = 0;
   beatBestThisGame = false;
+  localHighScoreRecordedThisGame = false;
   lastLogLen = 0;
   logEl.replaceChildren();
   overlay.classList.remove('show');
@@ -1586,15 +1623,7 @@ window.addEventListener('resize', () => { computeLayout(); draw(); });
 // uses for onboarding flags and bestScore.
 nameInput.value = readPlayerName();
 
-async function renderLeaderboard() {
-  leaderboardListEl.replaceChildren();
-  const rows = await fetchTopScores(10);
-  if (!rows) {
-    const li = document.createElement('li');
-    li.textContent = 'Leaderboard unavailable';
-    leaderboardListEl.appendChild(li);
-    return;
-  }
+function renderLeaderboardRows(rows) {
   const medals = ['🥇', '🥈', '🥉'];
   rows.forEach((row, i) => {
     const li = document.createElement('li');
@@ -1610,6 +1639,25 @@ async function renderLeaderboard() {
     li.append(icon, name, score);
     leaderboardListEl.appendChild(li);
   });
+}
+
+async function renderLeaderboard() {
+  leaderboardListEl.replaceChildren();
+  const rows = await fetchTopScores(10);
+  if (rows) {
+    renderLeaderboardRows(rows);
+    return;
+  }
+  // Supabase not configured (or network failed): fall back to the local
+  // top-10 (GDD 15) instead of the online list, reusing the same rendering.
+  const localRows = readLocalHighScores();
+  if (localRows.length === 0) {
+    const li = document.createElement('li');
+    li.textContent = 'No scores yet -- play a round!';
+    leaderboardListEl.appendChild(li);
+    return;
+  }
+  renderLeaderboardRows(localRows);
 }
 
 renderLeaderboard(); // sidebar is always visible, so populate it on load
