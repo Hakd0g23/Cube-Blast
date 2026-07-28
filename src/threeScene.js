@@ -28,7 +28,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { BOARD_SIZE } from './pieces.js';
-import { BLOCK_MAP_PATH } from './blockTextureConfig.js';
+import { BLOCK_MAP_PATH, FAMILY_BY_COLOR } from './blockTextureConfig.js';
 
 export const CELL_PX = 56;
 export const GUTTER_PX = 4;
@@ -82,9 +82,33 @@ const BACKDROP_SIZE = BOARD_SIZE * 3; // matches backdropGeo's PlaneGeometry dim
 // (base64-embedded buffers/images), copied from the audited source pack
 // into assets/mascots/ so the game doesn't depend on the user's Downloads
 // folder at runtime.
+//
+// mascot-swap (2026-07-28): replaced the original Chicken/Zombie pair with
+// a girl, boy, dog, and cat to match the "Block Blast!"-style reference
+// (humanoid mascots + a dog/cat), superseding mascot-prop-placement's
+// original "no literal creeper mesh exists" workaround entirely — Zombie is
+// no longer used at all. Source: Characters/glTF/Character_Female_1.gltf,
+// Characters/glTF/Character_Male_1.gltf, Animals/glTF/Dog.gltf,
+// Animals/glTF/Cat.gltf from the same audited Quaternius pack, all
+// confirmed self-contained (no external .bin/texture references) before
+// copying.
+//
+// LEDGE_MARGIN keeps the same "how far from the ledge's ends" convention
+// the original 2-prop layout used (1.1 world units in from each edge);
+// four props are now spread evenly across the space between those margins
+// instead of just the two flanking ends.
+const LEDGE_MARGIN = 1.1;
+const LEDGE_USABLE_HALF = LEDGE_WIDTH / 2 - LEDGE_MARGIN;
+function ledgeSlotX(index, count) {
+  if (count === 1) return 0;
+  const t = index / (count - 1); // 0..1 across the usable ledge span
+  return -LEDGE_USABLE_HALF + t * (2 * LEDGE_USABLE_HALF);
+}
 const MASCOTS = [
-  { url: new URL('../assets/mascots/Chicken.gltf', import.meta.url).href, targetHeight: 0.85, x: -(LEDGE_WIDTH / 2 - 1.1) },
-  { url: new URL('../assets/mascots/Zombie.gltf', import.meta.url).href, targetHeight: 1.35, x: (LEDGE_WIDTH / 2 - 1.1) },
+  { url: new URL('../assets/mascots/Character_Female_1.gltf', import.meta.url).href, targetHeight: 1.3, x: ledgeSlotX(0, 4) },
+  { url: new URL('../assets/mascots/Character_Male_1.gltf', import.meta.url).href, targetHeight: 1.35, x: ledgeSlotX(1, 4) },
+  { url: new URL('../assets/mascots/Dog.gltf', import.meta.url).href, targetHeight: 0.55, x: ledgeSlotX(2, 4) },
+  { url: new URL('../assets/mascots/Cat.gltf', import.meta.url).href, targetHeight: 0.4, x: ledgeSlotX(3, 4) },
 ];
 
 /**
@@ -208,21 +232,31 @@ export function createThreeScene(container) {
       cube.position.set((c - BOARD_HALF) * CELL_STRIDE, (BOARD_HALF - r) * CELL_STRIDE, CUBE_HEIGHT / 2);
       cube.castShadow = true;
       cube.receiveShadow = true;
+      // Hidden until the first real board-state sync (gameplay-state-wiring)
+      // assigns real occupied/empty state — an unoccupied board cell has no
+      // family to show, so cubes start invisible rather than a flat demo
+      // color, per the "empty cell -> hidden/dim" fallback contract this
+      // workstream's brief calls for.
+      cube.visible = false;
       scene.add(cube);
       cubes.push({ r, c, mesh: cube, family: null });
     }
   }
 
-  // ---- per-family block materials (texture-to-material-mapping) ---------
+  // ---- per-family block materials (texture-to-material-mapping, extended
+  // by gameplay-state-wiring) ------------------------------------------------
   // Reuses the SAME assets/blocks/block-map.json + assets/blocks/*.png the
   // 2D renderer's loadBlockTextures() already established as the single
   // source of truth for block art (GDD 4A: "reuse assets/blocks/*.png
-  // as-is"). This scene isn't wired to live gameplay state yet (that's
-  // ui-overlay-integration's job), so there's no real per-cell color to
-  // read — cubes are assigned one family each, cycling deterministically by
-  // (r + c), purely so all 7 families are demonstrably rendering as real,
-  // distinct textures rather than one placeholder color repeated 64 times.
+  // as-is"), and the SAME FAMILY_BY_COLOR color->family mapping the 2D
+  // renderer uses (src/blockTextureConfig.js) — not a re-derived/duplicated
+  // mapping. `familyByName` lets setBoardState() below look up the right
+  // material for whatever color a real occupied board cell holds, once
+  // materials finish loading (each family's own load resolves to either a
+  // real texture or a flat per-family hex fallback, same "stays playable
+  // either way" contract as the 2D renderer's drawBlockCell()).
   const familyMaterials = [];
+  const familyByName = new Map();
   let materialsFailed = false;
   const materialsReadyPromise = (async () => {
     let mapData;
@@ -247,7 +281,9 @@ export function createThreeScene(container) {
                 tex.magFilter = THREE.NearestFilter; // pixel-art source, keep crisp
                 tex.generateMipmaps = false;
                 tex.minFilter = THREE.LinearFilter;
-                familyMaterials.push({ name, mat: new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0.05 }) });
+                const entry = { name, mat: new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0.05 }) };
+                familyMaterials.push(entry);
+                familyByName.set(name, entry);
                 resolve(true);
               },
               undefined,
@@ -256,10 +292,12 @@ export function createThreeScene(container) {
                 // (still distinct per family, closer to render-swap's own
                 // per-color flat fallback than falling all the way back to
                 // one shared placeholder color would be).
-                familyMaterials.push({
+                const entry = {
                   name,
                   mat: new THREE.MeshStandardMaterial({ color: new THREE.Color(family.hex), roughness: 0.85, metalness: 0.05 }),
-                });
+                };
+                familyMaterials.push(entry);
+                familyByName.set(name, entry);
                 resolve(false);
               }
             );
@@ -270,13 +308,43 @@ export function createThreeScene(container) {
       materialsFailed = true;
       return false;
     }
-    cubes.forEach((entry, i) => {
-      const chosen = familyMaterials[(entry.r + entry.c) % familyMaterials.length];
-      entry.mesh.material = chosen.mat;
-      entry.family = chosen.name;
-    });
+    // No demo assignment anymore (gameplay-state-wiring) — cubes stay hidden
+    // until setBoardState() below is driven by the caller's render loop with
+    // real board state. If setBoardState() already ran once before materials
+    // finished loading (board had cells occupied on first sync, materials
+    // still async), re-apply it now so those cells pick up their real
+    // family instead of staying on the flat placeholder forever.
+    if (lastBoardState) setBoardState(lastBoardState);
     return true;
   })();
+
+  // ---- live board-state sync (gameplay-state-wiring) ---------------------
+  // Reads src/core.js's board grid (rows of either null or {color}) the same
+  // way the 2D renderer's draw() loop does (src/main.js: `state.board[r][c]`,
+  // `cell.color` -> drawBlockCell(x, y, size, cell.color)) and mirrors it
+  // onto the 64 cube meshes: occupied cell -> visible with the matching
+  // family material (FAMILY_BY_COLOR, same mapping as the 2D renderer);
+  // empty cell -> hidden. Cheap full 64-cube refresh per call (no diffing) —
+  // adequate for an 8x8 grid, not a perf-critical size, per this workstream's
+  // scope. Safe to call before materials finish loading: falls back to the
+  // shared placeholderMat until familyByName has the real entry.
+  let lastBoardState = null;
+  function setBoardState(board) {
+    lastBoardState = board;
+    for (const entry of cubes) {
+      const cell = board && board[entry.r] ? board[entry.r][entry.c] : null;
+      if (cell == null) {
+        entry.mesh.visible = false;
+        entry.family = null;
+        continue;
+      }
+      entry.mesh.visible = true;
+      const familyName = FAMILY_BY_COLOR[cell.color] || null;
+      const chosen = familyName ? familyByName.get(familyName) : null;
+      entry.mesh.material = chosen ? chosen.mat : placeholderMat;
+      entry.family = chosen ? chosen.name : null;
+    }
+  }
 
   // ---- ledge/shelf placeholder (mascot-prop-placement) ------------------
   // Minimal box standing in for the reference image's ledge — sits just
@@ -376,6 +444,7 @@ export function createThreeScene(container) {
     resize,
     render,
     dispose,
+    setBoardState,
     materialsReadyPromise,
     backdropTextureLoaded,
     isMaterialsFailed: () => materialsFailed,

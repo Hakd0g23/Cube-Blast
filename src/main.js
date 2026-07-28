@@ -5,7 +5,7 @@
 
 import { createGame, placePiece, canPlaceAt, mulberry32, QUEUE_CAP, TRAY_BASE_SIZE, WAVE_MAX_TIER, waveCalloutText } from './core.js';
 import { BOARD_SIZE, COLORS } from './pieces.js';
-import { BLOCK_MAP_PATH } from './blockTextureConfig.js';
+import { BLOCK_MAP_PATH, FAMILY_BY_COLOR } from './blockTextureConfig.js';
 import { playLineClear, playShardScatter, playGameOver, playComboVoice, playPerfectClearVoice, unlockAudio, setWaveTier, startBgm, setSfxVolume, getSfxVolume, setBgmVolume, getBgmVolume } from './audio.js';
 import { fetchTopScores, submitScore } from './leaderboard.js';
 
@@ -880,15 +880,9 @@ function shapeExtent(cells) {
 // is intentionally unused by this mapping (no palette color reads as
 // "brown") -- still a valid baked family, just not needed for the 7-color
 // piece palette; nothing in the GDD requires all 8 families to be in use.
-const FAMILY_BY_COLOR = {
-  '#ae133a': 'brick_red',
-  '#4529ff': 'stone_gray',
-  '#45eda7': 'grass_green',
-  '#f1c40f': 'gold_yellow',
-  '#ac5ae2': 'amethyst_purple',
-  '#e07c52': 'planks_tan',
-  '#1c899c': 'diamond_cyan',
-};
+// FAMILY_BY_COLOR itself moved to blockTextureConfig.js (gameplay-state-wiring,
+// 2026-07-28) so src/threeScene.js can reuse the exact same mapping instead of
+// duplicating it -- imported above.
 
 const blockAtlasImg = new Image();
 let blockMapData = null;

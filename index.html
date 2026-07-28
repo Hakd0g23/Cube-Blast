@@ -293,46 +293,21 @@
              was already a correctly-positioned DOM overlay with zero edits.
              Structural/placeholder only per this workstream's scope --
              static example values, not wired to real game state. -->
+        <!-- gameplay-state-wiring (2026-07-28): slot contents below are no
+             longer static placeholders -- src/threeBootstrap.js rebuilds
+             #three-queue-label/#three-queue-slots/#three-tray-label/
+             #three-tray-slots' children every frame from the live
+             src/core.js state (window.__fractureDebug.getState()), the same
+             state the Canvas 2D pointer-drag input mutates. Left empty here;
+             JS-populated only. -->
         <div id="three-ui-overlay" aria-hidden="true">
           <div id="three-queue-row">
-            <div class="three-ui-label">Shard Queue (1/4)</div>
-            <div class="three-slot-row three-queue-slots">
-              <div class="three-slot three-queue-slot">
-                <div class="three-piece-mini" style="grid-template-columns:repeat(1,1fr); grid-template-rows:repeat(1,1fr);">
-                  <div class="three-piece-cell" style="background:#ae133a;"></div>
-                </div>
-              </div>
-              <div class="three-slot three-queue-slot dashed"></div>
-              <div class="three-slot three-queue-slot dashed"></div>
-              <div class="three-slot three-queue-slot dashed"></div>
-            </div>
+            <div class="three-ui-label" id="three-queue-label">Shard Queue (0/4)</div>
+            <div class="three-slot-row three-queue-slots" id="three-queue-slots"></div>
           </div>
           <div id="three-tray-row">
-            <div class="three-ui-label">Tray</div>
-            <div class="three-slot-row three-tray-slots">
-              <div class="three-slot three-tray-slot">
-                <div class="three-piece-mini" style="grid-template-columns:repeat(2,1fr); grid-template-rows:repeat(2,1fr);">
-                  <div class="three-piece-cell" style="grid-column:1;grid-row:1;background:#4529ff;"></div>
-                  <div class="three-piece-cell" style="grid-column:2;grid-row:1;background:#4529ff;"></div>
-                  <div class="three-piece-cell" style="grid-column:1;grid-row:2;background:#4529ff;"></div>
-                  <div class="three-piece-cell" style="grid-column:2;grid-row:2;background:#4529ff;"></div>
-                </div>
-              </div>
-              <div class="three-slot three-tray-slot">
-                <div class="three-piece-mini" style="grid-template-columns:repeat(3,1fr); grid-template-rows:repeat(1,1fr);">
-                  <div class="three-piece-cell" style="grid-column:1;grid-row:1;background:#45eda7;"></div>
-                  <div class="three-piece-cell" style="grid-column:2;grid-row:1;background:#45eda7;"></div>
-                  <div class="three-piece-cell" style="grid-column:3;grid-row:1;background:#45eda7;"></div>
-                </div>
-              </div>
-              <div class="three-slot three-tray-slot">
-                <div class="three-piece-mini" style="grid-template-columns:repeat(2,1fr); grid-template-rows:repeat(2,1fr);">
-                  <div class="three-piece-cell" style="grid-column:1;grid-row:1;background:#f1c40f;"></div>
-                  <div class="three-piece-cell" style="grid-column:1;grid-row:2;background:#f1c40f;"></div>
-                  <div class="three-piece-cell" style="grid-column:2;grid-row:2;background:#f1c40f;"></div>
-                </div>
-              </div>
-            </div>
+            <div class="three-ui-label" id="three-tray-label">Tray</div>
+            <div class="three-slot-row three-tray-slots" id="three-tray-slots"></div>
           </div>
         </div>
       </div>
