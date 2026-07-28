@@ -13,5 +13,8 @@
     "@capacitor/ios": "^8.4.2",
     "playwright": "1.62.0",
     "serve": "^14.2.4"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
   }
 }

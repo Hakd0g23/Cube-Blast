@@ -12,8 +12,8 @@ Fracture is a block-placement puzzle game where you drag polyomino pieces from a
   - Both desktop (mouse) and mobile (touch) are supported, matching the current release.
 
 ## 2. Technical Requirements
-- Rendering: Canvas 2D
-- Single HTML file with inline CSS and JS
+- Rendering: Three.js 3D (WebGL), migrated from Canvas 2D as of the 2026-07-28 rendering pivot — same top-down camera angle and grid layout, existing 2D block textures reused as materials. See new section 4A for the full spec.
+- Single HTML file with inline CSS and JS; Three.js loaded as a module/bundle dependency
 - Unit system: pixels. Reference scale: one grid cell = 56×56 pixels; the 8×8 board = 448×448 pixels plus 4px gutters.
 - Asset loading: block textures loaded from an image atlas or individual images before play; game shows a brief "Loading blocks…" state until decode completes.
 
@@ -40,6 +40,48 @@ Color palette with purpose:
 Art style: flat 2D cells textured with pixel-art voxel block faces; subtle beveled edge shading drawn per cell to sell depth. Blocky, readable, warm.
 
 Mood/atmosphere: relaxed, tactile, "building" satisfaction; each placement should feel like snapping a real cube into place.
+
+## 4A. Rendering, Camera & Lighting Pivot (Three.js 3D — added 2026-07-28)
+
+**Scope:** rendering-layer upgrade only. Board rules, scoring, shard-queue mechanic, piece behavior, color/texture families (section 4), and juice timings (section 12 values) are UNCHANGED — this section specifies how the same game now gets drawn. Synthesized from threejs-feasibility-framing (game-engineer) and the re-scoped 3d-asset-audit (game-asset-director), reconciled where they conflicted (see mascot-props below).
+
+**Scene & camera:**
+- Board geometry: each cell becomes a `BoxGeometry` cube (or an imported Quaternius glTF block mesh where one maps cleanly to an existing family — see texture/material mapping below), replacing the flat `drawBlockCell` canvas rect. Grid math (cell size, gutters, board origin) ports directly from the existing 2D layout constants — no redesign needed.
+- Camera: `OrthographicCamera`, FRONT-ON, facing the board straight-on along a single fixed axis — the board is a VERTICAL plane facing the camera (classic-Tetris framing), not a top-down/angled-down view of a flat horizontal grid. The reference screenshot's angled isometric-top-down look applies only to block texture/style reference now, NOT to camera framing (corrected 2026-07-28 — supersedes the prior "angled top-down" line below).
+- Board orientation: cells stack/sit in a vertical XY plane; camera looks straight down the Z axis at that plane (no angle, no tilt, no perspective distortion).
+- No scrolling, no dynamic camera movement — matches section 8's "static board".
+
+**Lighting (replaces the old bevel trick):**
+- The current Canvas 2D "bevel" (white 12%-alpha top overlay, black 18%-alpha bottom/right overlay, per `drawBlockCell`) has no direct 3D equivalent and is retired outright. A real directional/hemisphere light setup takes over that job on the actual cube geometry — this is a first-class rendering decision, not a missing feature: source textures were confirmed flat/unbevelled (`assets/blocks/*.png`, 56×56 RGBA tiles baked by `tools/block-bake/build.py`), so lighting is free to fully own the depth cue with no baked-in shading to conflict with.
+- No dynamic shadow-map tuning or per-wave lighting changes beyond what replaces the bevel (explicit scope cut, keeps the first Three.js lighting pass bounded).
+
+**Materials & textures:**
+- Reuse `assets/blocks/*.png` directly as `map` on `MeshStandardMaterial` — no separate top/side texture variants needed; the light does the shading work the bevel used to.
+- Textures get padded to 64×64 POT with `ClampToEdgeWrapping` (a rerun of `tools/block-bake/build.py`) before use as WebGL textures.
+- `FAMILY_BY_COLOR`'s existing 7→8 family mapping (progress.md render-swap notes) carries over unchanged.
+
+**Mascot props (reconciled decision — game-engineer and game-asset-director's briefs conflicted here):**
+- Use STATIC (non-rigged, non-animated) Quaternius glTF meshes from `~/Downloads/Cube World - Aug 2023/` (Animals/Enemies folders — chicken, creeper-like mob) via `GLTFLoader`. Placement is revised for the front-on wall composition (2026-07-28): props sit to the SIDES of the vertical board plane (flanking it left/right, facing camera), not arranged around a floor-level board — there is no floor for them to stand on in this framing.
+- This is the locked call, not open for re-litigation: it gets the real body-silhouette game-asset-director found necessary (a textured box doesn't read as a mascot), while keeping game-engineer's actual risk — a new animation-import pipeline stacked on a first Three.js pass — off the table, since a static prop is just load-and-place, no `AnimationMixer`/rig system involved.
+- If Quaternius's low-poly style visually clashes against the board's flat pixel-art blocks, a shared unlit/toon material pass is the fallback (flagged by game-asset-director, not committed to unless verification shows a real clash).
+
+**Backdrop (revised 2026-07-28 — was "ground/table surface"):**
+- With a front-on wall view, there is no floor plane visible (the camera never looks down at a ground). The void-around-the-board concern is instead handled by a flat BACKDROP/background wall behind the board plane — a simple dark background material or plane, matching the existing dark palette in section 4. No skybox, no ground texture, no table surface needed.
+
+**UI (unchanged in approach):**
+- Score/tray/piece-preview UI stays DOM/CSS overlay on top of the WebGL canvas, exactly as it overlays the Canvas 2D board today — not migrated into the 3D scene. This keeps `ui-overlay-integration` a thin layer, not a rewrite.
+
+**Known first-time-in-this-workspace risks (no prior Three.js work exists here — flagged, not blockers):**
+- UV-mapping the existing flat textures onto `BoxGeometry`'s 6 faces per cell.
+- Mobile WebGL support and context-loss handling (the game ships to mobile touch per section 13).
+- Draw-call count at 64+ board meshes plus mascot props and shard-queue chips: build naive (individual meshes) first; only reach for `InstancedMesh` if profiling shows it's actually needed (explicit scope cut against premature optimization).
+
+**Explicit scope cuts for this pivot (v1):**
+- No dynamic lighting/shadow tuning beyond the bevel replacement.
+- No camera movement or orbit controls.
+- No premature `InstancedMesh` adoption.
+- No UI migration into the 3D scene.
+- Mascots are static (non-animated) props, not rigged characters.
 
 ## 5. Player Specifications
 There is no avatar. The "player" acts through a held piece (cursor/finger) and the tray.
@@ -202,7 +244,7 @@ Tied to wave number (existing wave system):
 
 ## 14. Out of Scope (V1)
 - Sound and music.
-- Migration to 3D / Three.js rendering.
+- ~~Migration to 3D / Three.js rendering.~~ **Superseded 2026-07-28: this migration is now in scope and underway. See section 4A.**
 - Animated Cube World characters/creatures (trees, animals, mobs from the render sheet are reference only).
 - New gameplay mechanics beyond the existing block-clear + shard-queue rules.
 - Power-ups, undo, or hints.

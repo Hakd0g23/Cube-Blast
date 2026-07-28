@@ -230,6 +230,15 @@
 
     <div id="stage-wrap">
       <canvas id="stage"></canvas>
+      <!-- threejs-scene-camera-setup (GDD sec 4A): foundational Three.js
+           scene/camera/lighting infra, mounted here ONLY behind ?three=1 so
+           the shipping Canvas 2D game is completely untouched by default --
+           later workstreams (texture-to-material-mapping, mascot-prop-
+           placement, ui-overlay-integration) decide the real compositing/
+           cutover. #three-stage sits in the same #stage-wrap so it inherits
+           the existing board-area sizing/position, but is display:none
+           unless activated. -->
+      <div id="three-stage-wrap" style="display:none; position:absolute; inset:0;"></div>
       <div id="pauseOverlay">
         <div class="pause-title">Paused — press P to resume</div>
       </div>
@@ -277,6 +286,14 @@
     <ol id="leaderboardList"></ol>
   </aside>
 </div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./node_modules/three/build/three.module.js"
+  }
+}
+</script>
 <script type="module" src="./src/main.js"></script>
+<script type="module" src="./src/threeBootstrap.js"></script>
 </body>
 </html>
