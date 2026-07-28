@@ -53,6 +53,38 @@ function squareCellFraction(ext, slotDesignW, slotDesignH, marginPx, capPx) {
   return { widthPct: ((ext.cols * s) / slotDesignW) * 100, heightPct: ((ext.rows * s) / slotDesignH) * 100 };
 }
 
+// Same HSL saturation/lightness boost as threeScene.js's boostSaturation()
+// (the 3D board's neon-block material color) -- ported to plain CSS-side JS
+// so the DOM tray/queue/drag-preview pieces read as the SAME neon color the
+// board cubes glow with, instead of the old flat PNG block textures the
+// neon-block overhaul on the 3D side left behind.
+function hexToHsl(hex) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d !== 0) {
+    s = d / (1 - Math.abs(2 * l - 1));
+    switch (max) {
+      case r: h = ((g - b) / d) % 6; break;
+      case g: h = (b - r) / d + 2; break;
+      default: h = (r - g) / d + 4;
+    }
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return { h, s, l };
+}
+
+function boostSaturationCss(hex, satTarget = 0.92, lightTarget = 0.56) {
+  const { h, s, l } = hexToHsl(hex);
+  const boostedS = Math.max(s, satTarget);
+  const boostedL = Math.min(Math.max(l, lightTarget * 0.85), lightTarget);
+  return `hsl(${h.toFixed(1)}, ${(boostedS * 100).toFixed(1)}%, ${(boostedL * 100).toFixed(1)}%)`;
+}
+
 function buildMiniPiece(shape, color, slotDesignW, slotDesignH, marginPx, capPx) {
   const ext = shapeExtent(shape);
   const mini = document.createElement('div');
@@ -67,14 +99,9 @@ function buildMiniPiece(shape, color, slotDesignW, slotDesignH, marginPx, capPx)
     cell.className = 'three-piece-cell';
     cell.style.gridColumn = String(c + 1);
     cell.style.gridRow = String(r + 1);
-    const family = FAMILY_BY_COLOR[color];
-    if (family) {
-      cell.style.backgroundColor = color;
-      cell.style.backgroundImage = `url(./assets/blocks/${family}.png)`;
-      cell.style.backgroundSize = 'cover';
-    } else {
-      cell.style.background = color;
-    }
+    const neon = FAMILY_BY_COLOR[color] ? boostSaturationCss(color) : color;
+    cell.style.background = neon;
+    cell.style.boxShadow = `0 0 6px 1px ${neon}`;
     mini.appendChild(cell);
   }
   return mini;
@@ -163,11 +190,10 @@ function updateFloatingPiece(clientX, clientY, piece) {
     cell.className = 'three-piece-cell';
     cell.style.gridColumn = String(c + 1);
     cell.style.gridRow = String(r + 1);
-    const family = FAMILY_BY_COLOR[piece.color];
-    if (family) {
-      cell.style.backgroundColor = piece.color;
-      cell.style.backgroundImage = `url(./assets/blocks/${family}.png)`;
-      cell.style.backgroundSize = 'cover';
+    if (FAMILY_BY_COLOR[piece.color]) {
+      const neon = boostSaturationCss(piece.color);
+      cell.style.background = neon;
+      cell.style.boxShadow = `0 0 6px 1px ${neon}`;
     } else {
       cell.style.background = piece.color;
     }
