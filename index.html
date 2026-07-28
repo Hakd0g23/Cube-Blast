@@ -164,6 +164,46 @@
     50% { transform: scale(1.2); text-shadow: 0 0 8px #F4C430, 0 0 14px #F4C430; }
     100% { transform: scale(1); text-shadow: none; }
   }
+  /* ui-overlay-integration: DOM/CSS tray + shard-queue overlay for the
+     ?three=1 preview (GDD sec 4A -- UI stays DOM/CSS, not in the 3D scene).
+     Sits inside #three-stage-wrap, which threeBootstrap.js already sizes in
+     px to match the responsive board footprint -- this overlay fills that
+     box (inset:0) and lays its two rows out with flex/percentage sizing (no
+     fixed px slot sizes) so it scales correctly at any viewport width,
+     mirroring the same top-row-queue / bottom-row-tray composition the 2D
+     canvas draw() loop uses (see src/main.js computeLayout/QUEUE_SLOT/
+     TRAY_SLOT_W/H), without depending on canvas pixel math. pointer-events
+     is left enabled at the container level but every row/slot below is
+     purely decorative (no click handlers), matching this pass's "structural
+     placeholder, not wired to gameplay" scope. */
+  #three-ui-overlay {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    justify-content: space-between; padding: 6px 4%; box-sizing: border-box;
+    pointer-events: none;
+    /* The Three.js <canvas> is appended into #three-stage-wrap at runtime
+       (src/threeScene.js createThreeScene), i.e. AFTER this overlay div in
+       DOM order -- without an explicit z-index the canvas would paint on
+       top of this overlay instead of under it, since later-DOM-order wins
+       ties within the same stacking context. z-index makes the layering
+       correct regardless of insertion order/timing. */
+    z-index: 2;
+  }
+  .three-ui-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .three-slot-row { display: flex; gap: 6px; }
+  #three-queue-row .three-slot-row { justify-content: flex-start; }
+  #three-tray-row .three-slot-row { justify-content: center; }
+  .three-slot {
+    background: rgba(0,0,0,0.18); border: 1.5px solid var(--border);
+    border-radius: 8px; display: flex; align-items: center; justify-content: center;
+    box-sizing: border-box;
+  }
+  .three-slot.dashed { border-style: dashed; background: transparent; }
+  .three-queue-slot { width: 13%; aspect-ratio: 1 / 1; max-width: 46px; }
+  .three-tray-slot { width: 20%; aspect-ratio: 96 / 86; max-width: 96px; }
+  .three-piece-mini {
+    display: grid; gap: 2px; width: 70%; height: 70%;
+  }
+  .three-piece-cell { border-radius: 2px; }
   #overlay h2 { margin: 0; font-size: 22px; color: var(--fg); }
   #bestDelta { font-size: 13px; color: var(--muted); }
   #bestDelta.new-best { color: var(--accent); font-weight: 600; }
@@ -238,7 +278,64 @@
            cutover. #three-stage sits in the same #stage-wrap so it inherits
            the existing board-area sizing/position, but is display:none
            unless activated. -->
-      <div id="three-stage-wrap" style="display:none; position:absolute; inset:0;"></div>
+      <div id="three-stage-wrap" style="display:none; position:absolute; inset:0;">
+        <!-- ui-overlay-integration (GDD sec 4A: "UI stays DOM/CSS overlay,
+             not migrated into the 3D scene"). The 2D renderer never had a
+             separate DOM tray/shard-queue -- both were drawn as part of the
+             single #stage canvas draw() loop (src/main.js). Since the
+             Three.js board is real 3D geometry (no 2D canvas draw loop to
+             piggyback on for these rows), this overlay recreates the same
+             tray/shard-queue composition as plain DOM/CSS, sized/positioned
+             to track #three-stage-wrap (which threeBootstrap.js already
+             sizes to match the responsive board footprint). Score itself
+             needed no change: #scoreLine above already renders in normal
+             document flow above #stage-wrap in both 2D and 3D modes, so it
+             was already a correctly-positioned DOM overlay with zero edits.
+             Structural/placeholder only per this workstream's scope --
+             static example values, not wired to real game state. -->
+        <div id="three-ui-overlay" aria-hidden="true">
+          <div id="three-queue-row">
+            <div class="three-ui-label">Shard Queue (1/4)</div>
+            <div class="three-slot-row three-queue-slots">
+              <div class="three-slot three-queue-slot">
+                <div class="three-piece-mini" style="grid-template-columns:repeat(1,1fr); grid-template-rows:repeat(1,1fr);">
+                  <div class="three-piece-cell" style="background:#ae133a;"></div>
+                </div>
+              </div>
+              <div class="three-slot three-queue-slot dashed"></div>
+              <div class="three-slot three-queue-slot dashed"></div>
+              <div class="three-slot three-queue-slot dashed"></div>
+            </div>
+          </div>
+          <div id="three-tray-row">
+            <div class="three-ui-label">Tray</div>
+            <div class="three-slot-row three-tray-slots">
+              <div class="three-slot three-tray-slot">
+                <div class="three-piece-mini" style="grid-template-columns:repeat(2,1fr); grid-template-rows:repeat(2,1fr);">
+                  <div class="three-piece-cell" style="grid-column:1;grid-row:1;background:#4529ff;"></div>
+                  <div class="three-piece-cell" style="grid-column:2;grid-row:1;background:#4529ff;"></div>
+                  <div class="three-piece-cell" style="grid-column:1;grid-row:2;background:#4529ff;"></div>
+                  <div class="three-piece-cell" style="grid-column:2;grid-row:2;background:#4529ff;"></div>
+                </div>
+              </div>
+              <div class="three-slot three-tray-slot">
+                <div class="three-piece-mini" style="grid-template-columns:repeat(3,1fr); grid-template-rows:repeat(1,1fr);">
+                  <div class="three-piece-cell" style="grid-column:1;grid-row:1;background:#45eda7;"></div>
+                  <div class="three-piece-cell" style="grid-column:2;grid-row:1;background:#45eda7;"></div>
+                  <div class="three-piece-cell" style="grid-column:3;grid-row:1;background:#45eda7;"></div>
+                </div>
+              </div>
+              <div class="three-slot three-tray-slot">
+                <div class="three-piece-mini" style="grid-template-columns:repeat(2,1fr); grid-template-rows:repeat(2,1fr);">
+                  <div class="three-piece-cell" style="grid-column:1;grid-row:1;background:#f1c40f;"></div>
+                  <div class="three-piece-cell" style="grid-column:1;grid-row:2;background:#f1c40f;"></div>
+                  <div class="three-piece-cell" style="grid-column:2;grid-row:2;background:#f1c40f;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
       <div id="pauseOverlay">
         <div class="pause-title">Paused — press P to resume</div>
       </div>
