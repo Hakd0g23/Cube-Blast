@@ -51,6 +51,25 @@ if (THREE_PREVIEW) {
       lightCount: () => handle.scene.children.filter((o) => o.isLight).length,
       canvas: () => handle.renderer.domElement,
       renderOnce: () => handle.render(),
+      // mascot-prop-placement additions:
+      ledgePosition: () => ({ x: handle.ledge.position.x, y: handle.ledge.position.y, z: handle.ledge.position.z }),
+      mascotsReady: () => handle.mascotsLoaded.then(() => true),
+      mascotCount: () => handle.mascots.length,
+      mascotInfo: () =>
+        handle.mascots.map((m) => ({
+          name: m.name,
+          x: m.root.position.x,
+          y: m.root.position.y,
+          z: m.root.position.z,
+          scale: m.root.scale.x,
+        })),
+      // texture-to-material-mapping additions:
+      materialsReady: () => handle.materialsReadyPromise,
+      backdropTextureReady: () => handle.backdropTextureLoaded,
+      materialsFailed: () => handle.isMaterialsFailed(),
+      backdropTextureFailed: () => handle.isBackdropTextureFailed(),
+      cubeFamilies: () => handle.cubes.map((c) => ({ r: c.r, c: c.c, family: c.family })),
+      backdropHasMap: () => !!handle.ground.material.map,
     };
   }
 }
