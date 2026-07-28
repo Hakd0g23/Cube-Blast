@@ -1,15 +1,22 @@
-// Cube Blast — dev-gated entry point for the Three.js scene/camera/lighting
-// infra (workstream: threejs-scene-camera-setup). Mirrors the existing
-// ?debug=1 pattern (src/main.js DEBUG_LOG_PANEL) for an opt-in dev flag:
-// completely inert unless ?three=1 is present in the URL, so the shipping
-// Canvas 2D game (src/main.js) is untouched by default. This keeps the
-// foundational scene buildable/verifiable now without forcing the
-// texture-mapping/mascot/UI-integration workstreams to land first just to
-// avoid regressing the live game.
+// Cube Blast — entry point for the Three.js scene/camera/lighting/gameplay
+// renderer. As of default-renderer-cutover (2026-07-28), Three.js is the
+// PRIMARY renderer: it mounts by default (no query flag needed). The old
+// Canvas 2D renderer (src/main.js's own draw()/pointer-drag code) is now the
+// opt-out path, gated behind `?legacy2d=1` -- when that flag is present, this
+// module does nothing at all and the shipping Canvas 2D game runs exactly as
+// it always has. src/main.js itself keeps running unconditionally in BOTH
+// modes regardless of this flag: it owns the core game state (core.js),
+// leaderboard, settings, pause, and the window.__fractureDebug hook this
+// module depends on to mirror state into the 3D scene -- only its OWN
+// canvas's visuals/input are what get hidden/inert when Three.js is active
+// (src/main.js's canvas pointer handlers are harmless no-ops once #stage is
+// hidden via visibility:hidden, since a hidden canvas never receives pointer
+// events -- confirmed, not assumed, during this cutover's verification).
 import { createThreeScene } from './threeScene.js';
 import { QUEUE_CAP, canPlaceAt } from './core.js';
 
-const THREE_PREVIEW = new URLSearchParams(location.search).has('three');
+const LEGACY_2D = new URLSearchParams(location.search).has('legacy2d');
+const THREE_PREVIEW = !LEGACY_2D;
 
 // ---- gameplay-state-wiring (2026-07-28) ------------------------------------
 // Mirrors src/main.js's live game state (window.__fractureDebug.getState() --

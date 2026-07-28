@@ -93,7 +93,17 @@ async function main() {
   await test('resize-during-drag: pointerup lands on the CURRENT-layout cell, not the stale pre-resize one (issue #1)', async () => {
     const page = await browser.newPage();
     await page.setViewportSize({ width: 300, height: 900 });
-    await page.goto(`http://127.0.0.1:${port}/index.html`);
+    // default-renderer-cutover (2026-07-28): Three.js is now the default
+    // (no-flag) renderer; this test specifically exercises the Canvas 2D
+    // #stage's own pointer-drag/resize math (dragTargetCell against
+    // src/main.js's canvas geometry), so it must explicitly opt into the
+    // legacy 2D renderer via ?legacy2d=1 -- without this flag, #stage is
+    // hidden (visibility:hidden) and never receives real pointer/hit-test
+    // events, which would make this whole test vacuous rather than failing
+    // loudly. A parallel 3D-renderer drag/resize regression test does not
+    // exist yet; flagged as a known gap in default-renderer-cutover's notes,
+    // not silently dropped.
+    await page.goto(`http://127.0.0.1:${port}/index.html?legacy2d=1`);
     await page.waitForFunction(() => !!window.__fractureDebug && !!window.__fractureDebug.geometry());
 
     // Grab layout A (pre-resize) ground truth straight from the live page,

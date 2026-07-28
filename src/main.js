@@ -1428,7 +1428,8 @@ function performPlacement(trayIndex, targetR, targetC) {
       // debug.placePiece()-based commit both funnel through -- so the 3D
       // scene's own juice effects (src/threeScene.js) hook in here rather
       // than duplicating any placement/clear logic. Inert no-op unless
-      // threeBootstrap.js has registered hooks (only happens under ?three=1).
+      // threeBootstrap.js has registered hooks (happens by default now that
+      // Three.js is the primary renderer; inert when ?legacy2d=1 opts out).
       window.__threeJuiceHooks?.onPlacement({
         cells: piece.shape, r0: targetR, c0: targetC, color: piece.color,
         lineCount: res.lineCount, rows: res.rows, cols: res.cols,

@@ -165,7 +165,9 @@
     100% { transform: scale(1); text-shadow: none; }
   }
   /* ui-overlay-integration: DOM/CSS tray + shard-queue overlay for the
-     ?three=1 preview (GDD sec 4A -- UI stays DOM/CSS, not in the 3D scene).
+     Three.js renderer, which is the default (no query flag) as of
+     default-renderer-cutover -- opt out via ?legacy2d=1 (GDD sec 4A -- UI
+     stays DOM/CSS, not in the 3D scene).
      Sits inside #three-stage-wrap, which threeBootstrap.js already sizes in
      px to match the responsive board footprint -- this overlay fills that
      box (inset:0) and lays its two rows out with flex/percentage sizing (no
@@ -285,14 +287,14 @@
 
     <div id="stage-wrap">
       <canvas id="stage"></canvas>
-      <!-- threejs-scene-camera-setup (GDD sec 4A): foundational Three.js
-           scene/camera/lighting infra, mounted here ONLY behind ?three=1 so
-           the shipping Canvas 2D game is completely untouched by default --
-           later workstreams (texture-to-material-mapping, mascot-prop-
-           placement, ui-overlay-integration) decide the real compositing/
-           cutover. #three-stage sits in the same #stage-wrap so it inherits
-           the existing board-area sizing/position, but is display:none
-           unless activated. -->
+      <!-- threejs-scene-camera-setup (GDD sec 4A): Three.js scene/camera/
+           lighting/gameplay renderer. As of default-renderer-cutover
+           (2026-07-28), this is the PRIMARY renderer and mounts by default
+           (no query flag) -- ?legacy2d=1 opts back into the old Canvas 2D
+           renderer instead (src/threeBootstrap.js gates on that flag).
+           #three-stage-wrap sits in the same #stage-wrap so it inherits the
+           existing board-area sizing/position, and is display:none unless
+           activated (i.e. hidden only when ?legacy2d=1 is present). -->
       <div id="three-stage-wrap" style="display:none; position:absolute; inset:0;">
         <!-- ui-overlay-integration (GDD sec 4A: "UI stays DOM/CSS overlay,
              not migrated into the 3D scene"). The 2D renderer never had a
