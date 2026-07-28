@@ -14,6 +14,7 @@
 // events -- confirmed, not assumed, during this cutover's verification).
 import { createThreeScene } from './threeScene.js';
 import { QUEUE_CAP, canPlaceAt } from './core.js';
+import { FAMILY_BY_COLOR } from './blockTextureConfig.js';
 
 const LEGACY_2D = new URLSearchParams(location.search).has('legacy2d');
 const THREE_PREVIEW = !LEGACY_2D;
@@ -46,7 +47,14 @@ function buildMiniPiece(shape, color) {
     cell.className = 'three-piece-cell';
     cell.style.gridColumn = String(c + 1);
     cell.style.gridRow = String(r + 1);
-    cell.style.background = color;
+    const family = FAMILY_BY_COLOR[color];
+    if (family) {
+      cell.style.backgroundColor = color;
+      cell.style.backgroundImage = `url(./assets/blocks/${family}.png)`;
+      cell.style.backgroundSize = 'cover';
+    } else {
+      cell.style.background = color;
+    }
     mini.appendChild(cell);
   }
   return mini;
