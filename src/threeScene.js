@@ -25,8 +25,8 @@
 // gutter becomes a proportional gap between cube meshes (4/56 world units)
 // instead of the 2D renderer's flat grid-line stroke.
 
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import * as THREE from 'https://unpkg.com/three@0.180.0/build/three.module.js';
+import { GLTFLoader } from 'https://unpkg.com/three@0.180.0/examples/jsm/loaders/GLTFLoader.js';
 import { BOARD_SIZE } from './pieces.js';
 import { BLOCK_MAP_PATH, FAMILY_BY_COLOR } from './blockTextureConfig.js';
 // juice-effects-port: reuse the SAME pause-safe virtual clock ux-loading-pass
