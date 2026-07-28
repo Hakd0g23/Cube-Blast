@@ -813,9 +813,26 @@ const TRAY_SLOT_H = 86;
 
 let layout = null;
 
+// viewport-scaling (2026-07-29): the old maxW cap (480, cellSize clamped to
+// 48) read as a small mobile-first box floating in a sea of unused page
+// space on a large desktop viewport -- per feedback, this loosens BOTH caps
+// so the board actually scales up on bigger screens instead of topping out
+// early. Also bounded by innerHeight (not just innerWidth), since the board
+// is square and the actual canvas is TALLER than it is wide (this maxW value
+// feeds cellSize, which drives gridW/gridH equally, but the fixed-px queue
+// row + tray row overhead on top of gridH is NOT reflected in maxW itself --
+// `window.innerHeight - 280` is that overhead (queue/tray rows + gaps,
+// ~212px) plus the header chrome above the canvas (~49px) plus a safety
+// margin, verified against a real Playwright viewport rather than guessed:
+// without it, a short/wide browser window (e.g. 1280x720) sized the canvas
+// TALLER than the viewport, pushing the tray off-screen entirely -- a real
+// regression caught by tests/threejs-gameplay.playwright.mjs's own
+// ?legacy2d=1 drag test. threeBootstrap.js's currentSize() mirrors this SAME
+// formula for the Three.js stage (see that function's own comment) -- the
+// two intentionally stay in sync; if this changes, that must too.
 function computeLayout() {
-  const maxW = Math.min(window.innerWidth - 24, 480);
-  cellSize = Math.floor(Math.max(30, Math.min(48, maxW / BOARD_SIZE)));
+  const maxW = Math.min(window.innerWidth - 24, window.innerHeight - 280, 720);
+  cellSize = Math.floor(Math.max(30, Math.min(72, maxW / BOARD_SIZE)));
   const gridW = cellSize * BOARD_SIZE;
   const gridH = cellSize * BOARD_SIZE;
 

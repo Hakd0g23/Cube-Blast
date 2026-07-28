@@ -73,43 +73,43 @@ const CAMERA_DISTANCE = BOARD_SIZE * 1.35;
 const BACKDROP_DEPTH = BOARD_SIZE * 0.75; // how far behind the board plane the backdrop wall sits
 
 // scene-layout-cleanup (2026-07-29): the ORIGINAL symmetric-frustum framing
-// (a single FRUSTUM_MARGIN applied equally top/bottom) packed the board,
-// the ledge, and both mascot pairs into the same vertical span the fixed-
-// size #three-stage-wrap square already had to also fit the DOM shard-queue
-// row (top) and DOM tray row (bottom) OVER, per the live screenshot the user
-// flagged: the queue box sat awkwardly on top of the board's top-left
-// corner, and the mascots visually overlapped the board's own bottom rows
-// (their heads landed inside the board's own world-Y span). Fixing this for
-// real (not just nudging px) means giving the vertical frustum asymmetric,
-// deliberately-sized top/bottom margins instead of one symmetric value:
+// packed the board, the ledge, and both mascot pairs into the same vertical
+// span the fixed-size #three-stage-wrap square already had to also fit the
+// DOM shard-queue row (top) and DOM tray row (bottom) OVER -- fixed with an
+// asymmetric top/bottom frustum instead of one symmetric value:
 //   - TOP_UI_MARGIN_FRAC: empty world-space band above the board's top edge,
-//     sized to clear the shard-queue DOM row's own rendered height (see
-//     index.html's #three-queue-row CSS: label + up to 40px slot + padding).
-//   - BOTTOM_UI_MARGIN_FRAC: empty world-space band below the ledge/mascot
-//     cluster, sized to clear the tray DOM row (label + up to 78px slot).
-//   - LEDGE_MASCOT_ZONE_FRAC: dedicated band directly under the board for
-//     the ledge + standing mascots, so their own geometry can't spill up
-//     into the board's rows OR down into the tray-row margin.
-//   - The board itself keeps the remaining (largest) fraction so gameplay
-//     legibility stays the priority; this DOES render the grid somewhat
-//     smaller than the old symmetric framing to make room for the other
-//     three bands within the same fixed-px square container — an explicit,
-//     deliberate trade-off (not a bug), per the brief's "adjust camera
-//     distance/framing... within the fixed front-on constraint."
-// These fractions were tuned by eye against a real Playwright screenshot of
-// the live composition (not derived from a closed-form layout formula) --
-// if index.html's queue/tray row CSS sizes change materially, re-check this
-// framing against a fresh screenshot rather than assuming it still holds.
-const BOARD_WORLD_HALF_HEIGHT = BOARD_HALF + CUBE_FOOTPRINT / 2; // board's own top/bottom edge distance from y=0
+//     sized to clear the shard-queue DOM row's own rendered height.
+//   - BOARD_FRAC: the board's own share of the total canvas height.
+//   - Everything else (derived, not independently chosen) becomes the
+//     bottom margin, clearing the DOM tray row with room to spare.
+//
+// mascot-side-placement (2026-07-29): superseded this pass's original
+// "mascots stand below the board on a ledge" framing entirely -- the user
+// asked for them relocated to flank the board's LEFT/RIGHT sides instead.
+// Since the container is a fixed SQUARE and cubes must stay undistorted
+// (world-units-per-pixel equal on both axes -- see resize() below), the
+// board's own vertical fraction (BOARD_FRAC) directly determines how much
+// horizontal margin exists on either side of it too: a smaller BOARD_FRAC
+// zooms the whole scene out, which shrinks the board somewhat but frees up
+// real side-margin room for the now much-bigger (3x, per the brief) side
+// mascots. Dropped from the original 0.53 to 0.48 -- a real, deliberate
+// trade-off (board renders ~9% smaller linearly) made specifically to give
+// "clearly visible, 300%-bigger, standing beside the board" mascots enough
+// room; see MASCOT_SIDE_MARGIN_WORLD below for the resulting per-side
+// budget. Re-tuned by eye against real screenshots, not a closed-form
+// derivation -- if index.html's queue/tray row CSS or the mascot scale
+// values change materially, re-check this framing against a fresh
+// screenshot rather than assuming it still holds.
+const BOARD_WORLD_HALF_HEIGHT = BOARD_HALF + CUBE_FOOTPRINT / 2; // board's own top/bottom (and, since square, left/right) edge distance from center
 const TOP_UI_MARGIN_FRAC = 0.14;
-const BOTTOM_UI_MARGIN_FRAC = 0.21;
-const BOARD_FRAC = 0.53;
-// LEDGE_MASCOT_ZONE_FRAC is whatever's left after the other three bands.
-const LEDGE_MASCOT_ZONE_FRAC = 1 - TOP_UI_MARGIN_FRAC - BOTTOM_UI_MARGIN_FRAC - BOARD_FRAC;
+const BOARD_FRAC = 0.48;
 const TOTAL_WORLD_HEIGHT = (2 * BOARD_WORLD_HALF_HEIGHT) / BOARD_FRAC;
 const FRUSTUM_TOP_WORLD = BOARD_WORLD_HALF_HEIGHT + TOP_UI_MARGIN_FRAC * TOTAL_WORLD_HEIGHT;
 const FRUSTUM_BOTTOM_WORLD = FRUSTUM_TOP_WORLD - TOTAL_WORLD_HEIGHT;
-const LEDGE_MASCOT_ZONE_WORLD = LEDGE_MASCOT_ZONE_FRAC * TOTAL_WORLD_HEIGHT; // budget the ledge+mascot geometry below must fit inside
+// Per-side horizontal room outside the board's own footprint (aspect=1
+// container, so the same TOTAL_WORLD_HEIGHT applies horizontally too, per
+// resize()'s uniform-world-units-per-pixel requirement).
+const MASCOT_SIDE_MARGIN_WORLD = (TOTAL_WORLD_HEIGHT - 2 * BOARD_WORLD_HALF_HEIGHT) / 2;
 
 // ---- juice-effects-port constants (workstream: juice-effects-port) --------
 // Ported 1:1 from src/main.js's GDD-12 juice-pass numbers (same durations/
@@ -134,28 +134,20 @@ const DEATH_SHAKE_PX = 6;
 const DEATH_FREEZE_MS = 120;
 const GOLD_HEX = 0xf4c430; // literal #F4C430, same as main.js's GOLD constant
 
-// ---- mascot-prop-placement (workstream: mascot-prop-placement) ------------
-// Per progress.md's threejs-scene-camera-setup rework notes: the reference
-// composition puts standing mascot props on a ledge/shelf BELOW the board
-// wall, not flanking its floor-level sides (that was the original, now-
-// superseded GDD 4A wording). There is no ledge geometry yet anywhere in the
-// scene, so this workstream adds a minimal placeholder ledge/shelf mesh
-// alongside the props. texture-to-material-mapping (a separate, parallel
-// workstream) owns the backdrop's actual brick material — this ledge is a
-// flat placeholder color, same convention as the existing backdrop stub.
+// ---- ledge/baseboard decoration (workstream: mascot-prop-placement) -------
+// Originally the surface mascots stood on; mascot-side-placement (below)
+// moved the mascots off it entirely, but the ledge itself stays as a small
+// decorative baseboard/trim strip under the board (reads fine as arcade-
+// cabinet-style trim even with nothing standing on it) -- removing it
+// outright wasn't asked for and it costs nothing to keep.
 const BOARD_BOTTOM_EDGE = -BOARD_HALF - CUBE_FOOTPRINT / 2; // y of the board's lowest cube edge
 const LEDGE_HEIGHT = 0.3;
 const LEDGE_DEPTH = 1.2;
-// scene-layout-cleanup: widened from 0.05 to a real visible gap now that the
-// asymmetric frustum above actually budgets room for it (LEDGE_MASCOT_ZONE_
-// WORLD) -- a bigger gap reads more clearly as "board" then "separate ledge
-// shelf below it" instead of the ledge looking fused onto the board's
-// underside.
 const LEDGE_GAP = 0.12;
 const LEDGE_TOP_Y = BOARD_BOTTOM_EDGE - LEDGE_GAP;
 const LEDGE_CENTER_Y = LEDGE_TOP_Y - LEDGE_HEIGHT / 2;
 const LEDGE_CENTER_Z = CUBE_HEIGHT / 2 + LEDGE_DEPTH / 2 - 0.1; // steps slightly toward the camera from the board plane
-const LEDGE_WIDTH = BOARD_SIZE + 1.5; // a bit wider than the board so flanking props have room
+const LEDGE_WIDTH = BOARD_SIZE + 1.5; // a bit wider than the board
 
 // ---- backdrop constants (neon-blocks-pass) -------------------------------
 // backdrop-cleanup (2026-07-29): retired the tiled brick-wall texture here --
@@ -173,48 +165,44 @@ const BACKDROP_SIZE = BOARD_SIZE * 3; // matches backdropGeo's PlaneGeometry dim
 //
 // mascot-swap (2026-07-28): replaced the original Chicken/Zombie pair with
 // a girl, boy, dog, and cat to match the "Block Blast!"-style reference
-// (humanoid mascots + a dog/cat), superseding mascot-prop-placement's
-// original "no literal creeper mesh exists" workaround entirely — Zombie is
-// no longer used at all. Source: Characters/glTF/Character_Female_1.gltf,
-// Characters/glTF/Character_Male_1.gltf, Animals/glTF/Dog.gltf,
+// (humanoid mascots + a dog/cat). Source: Characters/glTF/Character_Female_1
+// .gltf, Characters/glTF/Character_Male_1.gltf, Animals/glTF/Dog.gltf,
 // Animals/glTF/Cat.gltf from the same audited Quaternius pack, all
-// confirmed self-contained (no external .bin/texture references) before
-// copying.
+// confirmed self-contained (no external .bin/texture references).
 //
-// LEDGE_MARGIN keeps the same "how far from the ledge's ends" convention
-// the original 2-prop layout used (1.1 world units in from each edge).
-//
-// mascot-clustering (2026-07-29): the user asked for two PAIRS instead of
-// one evenly-spaced row of 4 -- "Boy dog to the lower left and Girl and cat
-// on the lower right." clusterSlotX(side, indexInCluster, clusterCount)
-// places `clusterCount` mascots close together around a cluster center that
-// itself sits partway out toward one end of the ledge's usable span (side =
-// -1 for the left cluster, +1 for the right), rather than ledgeSlotX's old
-// "spread evenly across the WHOLE span" behavior.
-const LEDGE_MARGIN = 1.1;
-const LEDGE_USABLE_HALF = LEDGE_WIDTH / 2 - LEDGE_MARGIN;
-const CLUSTER_CENTER_OFFSET = LEDGE_USABLE_HALF * 0.55; // how far each cluster's center sits from the ledge's own center
-const CLUSTER_INNER_GAP = 0.85; // world units between the two mascots within one cluster
-function clusterSlotX(side, indexInCluster, clusterCount) {
-  const center = side * CLUSTER_CENTER_OFFSET;
+// mascot-side-placement (2026-07-29): re-confirmed clustering ("boy and dog
+// on left side cat and girl on right side" -- same Male+Dog / Female+Cat
+// pairing as the earlier below-the-board layout) but relocated from the
+// ledge to flank the board's left/right sides, standing on the same implied
+// floor level the board's own bottom edge sits on (BOARD_BOTTOM_EDGE) rather
+// than a raised shelf. sideClusterX(side, indexInCluster, clusterCount)
+// centers each pair within its own side's MASCOT_SIDE_MARGIN_WORLD budget
+// (computed above from BOARD_FRAC), pushed most of the way out toward the
+// frustum edge so they read as flanking the board, not crowding it.
+const MASCOT_CLUSTER_CENTER_X = BOARD_WORLD_HALF_HEIGHT + MASCOT_SIDE_MARGIN_WORLD * 0.5;
+// How far in front of the board plane the side mascots stand -- independent
+// of the ledge (they no longer stand on it). Module-level (not inside
+// createThreeScene) so the dedicated mascot lighting added below can share
+// the exact same Z the mascot loader positions them at.
+const MASCOT_STAND_Z = CUBE_HEIGHT / 2 + 0.5;
+const MASCOT_CLUSTER_INNER_GAP = 1.5; // world units between the two mascots within one side cluster (bigger than the old 0.85 -- these are ~3x the size now)
+function sideClusterX(side, indexInCluster, clusterCount) {
+  const center = side * MASCOT_CLUSTER_CENTER_X;
   if (clusterCount === 1) return center;
-  const halfSpan = (CLUSTER_INNER_GAP * (clusterCount - 1)) / 2;
+  const halfSpan = (MASCOT_CLUSTER_INNER_GAP * (clusterCount - 1)) / 2;
   const t = indexInCluster / (clusterCount - 1); // 0..1 across this cluster's own span
   return center - halfSpan + t * (2 * halfSpan);
 }
-// scene-layout-cleanup: target heights trimmed down from the original
-// 1.3/1.35 (humans) -- at that height the mascots' heads reached up into the
-// board's own bottom rows once the asymmetric frustum above gave the ledge/
-// mascot band its own dedicated (finite) vertical budget. Smaller mascots
-// also just read better as "props on a shelf below the board" rather than
-// human-scale figures competing with the grid for attention.
+// mascot-scale-pass (2026-07-29): "make the mascots 300% bigger" -- literal
+// 3x of the prior below-the-board targetHeight values (1.05/0.48/1.0/0.36).
+const MASCOT_SCALE_MULTIPLIER = 3;
 const MASCOTS = [
-  // Left cluster: boy + dog.
-  { url: new URL('../assets/mascots/Character_Male_1.gltf', import.meta.url).href, targetHeight: 1.05, x: clusterSlotX(-1, 0, 2) },
-  { url: new URL('../assets/mascots/Dog.gltf', import.meta.url).href, targetHeight: 0.48, x: clusterSlotX(-1, 1, 2) },
-  // Right cluster: girl + cat.
-  { url: new URL('../assets/mascots/Character_Female_1.gltf', import.meta.url).href, targetHeight: 1.0, x: clusterSlotX(1, 0, 2) },
-  { url: new URL('../assets/mascots/Cat.gltf', import.meta.url).href, targetHeight: 0.36, x: clusterSlotX(1, 1, 2) },
+  // Left cluster: boy + dog, facing right (+X, toward the board).
+  { url: new URL('../assets/mascots/Character_Male_1.gltf', import.meta.url).href, targetHeight: 1.05 * MASCOT_SCALE_MULTIPLIER, x: sideClusterX(-1, 0, 2), side: -1 },
+  { url: new URL('../assets/mascots/Dog.gltf', import.meta.url).href, targetHeight: 0.48 * MASCOT_SCALE_MULTIPLIER, x: sideClusterX(-1, 1, 2), side: -1 },
+  // Right cluster: girl + cat, facing left (-X, toward the board).
+  { url: new URL('../assets/mascots/Character_Female_1.gltf', import.meta.url).href, targetHeight: 1.0 * MASCOT_SCALE_MULTIPLIER, x: sideClusterX(1, 0, 2), side: 1 },
+  { url: new URL('../assets/mascots/Cat.gltf', import.meta.url).href, targetHeight: 0.36 * MASCOT_SCALE_MULTIPLIER, x: sideClusterX(1, 1, 2), side: 1 },
 ];
 
 // ---- neon-blocks-pass: per-family neon material colors ------------------
@@ -235,7 +223,11 @@ const MASCOTS = [
 // fuller saturation/lightness before it becomes a material's base color/
 // emissive tint, so the neon look reads as genuinely vibrant/punchy rather
 // than just "the same muted color, now glowing."
-const NEON_EMISSIVE_INTENSITY = 1.15;
+// glow-dial-back (2026-07-29): the user said the first neon pass was "too
+// bright" / blown-out. Dropped from 1.15 -- still glows, but the cube's own
+// base color reads clearly instead of getting washed out to near-white by
+// an overly hot emissive term stacked with bloom.
+const NEON_EMISSIVE_INTENSITY = 0.55;
 function boostSaturation(hex, satTarget = 0.92, lightTarget = 0.56) {
   const c = new THREE.Color(hex);
   const hsl = { h: 0, s: 0, l: 0 };
@@ -283,20 +275,17 @@ export function createThreeScene(container) {
   // ---- neon-blocks-pass: bloom post-processing ---------------------------
   // A composer pipeline (RenderPass -> UnrealBloomPass -> OutputPass)
   // replaces the old single renderer.render(scene, camera) call in render()
-  // below. Threshold is set high enough (0.72, near the top of the 0..1
-  // range UnrealBloomPass reads scene luminance against) that the backdrop
-  // gradient, ledge, and empty-cell dim tiles stay UN-bloomed -- only the
-  // genuinely bright emissive neon cube faces (and the gold flash / shard
-  // effects, which are already near-white/saturated) exceed it and glow.
-  // Kept as a real (if judgment-call) scope decision rather than skipped:
-  // flat emissive alone read as "slightly brighter color," not "glowing" --
-  // see this pass's summary for the tradeoff (added GPU cost of an extra
-  // full-screen blur pass, negligible for an 8x8-cube scene at this
-  // resolution).
+  // below.
+  // glow-dial-back (2026-07-29): the first pass (strength 0.55, radius 0.5,
+  // threshold 0.72) read as blown-out/washed-out per feedback -- strength
+  // dropped and threshold raised further so only the genuinely brightest
+  // emissive neon faces (and gold-flash/shard effects) bloom at all, and
+  // radius trimmed so the glow that IS there stays a tight halo around the
+  // cube rather than smearing across neighboring cells.
   const composer = new EffectComposer(renderer);
   const renderPass = new RenderPass(scene, camera);
   composer.addPass(renderPass);
-  const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.55, 0.5, 0.72);
+  const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.28, 0.35, 0.82);
   composer.addPass(bloomPass);
   const outputPass = new OutputPass();
   composer.addPass(outputPass);
@@ -360,6 +349,25 @@ export function createThreeScene(container) {
   accentRight.position.set(BOARD_SIZE * 0.55, -BOARD_SIZE * 0.1, CUBE_HEIGHT * 2);
   scene.add(accentRight);
 
+  // ---- mascot-lighting (2026-07-29) --------------------------------------
+  // Every light above is positioned/aimed for the BOARD -- the (now much
+  // bigger, side-mounted) mascots were reading as dark silhouettes against
+  // the board's own glow per feedback. One warm-white PointLight per side
+  // cluster, centered on where the mascots actually stand now
+  // (MASCOT_CLUSTER_CENTER_X/MASCOT_STAND_Z, both module-level so they stay
+  // in sync with the mascot loader's own placement below), positioned above
+  // and slightly in front so it lights faces/fronts rather than washing out
+  // from directly overhead. No shadow casting (would double up on the key
+  // light's own shadow work for no real depth-cue benefit here).
+  const mascotLightY = BOARD_BOTTOM_EDGE + 2.6; // roughly chest/head height for a 3x-scaled human mascot
+  const mascotLightRange = MASCOT_SIDE_MARGIN_WORLD * 2.8;
+  const mascotLeftLight = new THREE.PointLight(0xfff3e0, 16, mascotLightRange, 1.7);
+  mascotLeftLight.position.set(-MASCOT_CLUSTER_CENTER_X, mascotLightY, MASCOT_STAND_Z + 2.6);
+  scene.add(mascotLeftLight);
+  const mascotRightLight = new THREE.PointLight(0xfff3e0, 16, mascotLightRange, 1.7);
+  mascotRightLight.position.set(MASCOT_CLUSTER_CENTER_X, mascotLightY, MASCOT_STAND_Z + 2.6);
+  scene.add(mascotRightLight);
+
   // ---- backdrop wall (GDD 4A, corrected 2026-07-28: front-on framing has
   // no floor visible — replaces the old ground/table stub plane with a flat
   // backdrop wall behind the board plane, facing the camera).
@@ -373,30 +381,73 @@ export function createThreeScene(container) {
   const ground = new THREE.Mesh(backdropGeo, backdropMat);
   // Upright, facing +Z (toward the camera), sitting behind the board plane.
   ground.position.z = -BACKDROP_DEPTH;
-  ground.receiveShadow = true;
+  // scene-layout-cleanup follow-up (2026-07-29): was `true` -- the backdrop
+  // plane (BACKDROP_SIZE=24) is far larger than keyLight's shadow-camera
+  // frustum (shadowExtent = BOARD_SIZE*0.9 = 7.2, sized for the board's own
+  // footprint), so the area outside that frustum showed a visible hard seam
+  // (a large wrong-looking dark/light "blob" cutting across the backdrop) --
+  // confirmed via screenshot once the wider side-mascot framing revealed
+  // more of the backdrop than the old framing ever showed. A flat gradient
+  // "clean neon void" backdrop was never meant to catch a realistic shadow
+  // anyway, so simplest correct fix is to just not have it receive shadows
+  // at all rather than trying to size a shadow camera to match it.
+  ground.receiveShadow = false;
   scene.add(ground);
 
-  function makeBackdropGradientTexture() {
+  // backdrop-theming (2026-07-29): the gradient used to be hardcoded dark
+  // regardless of the page's own light/dark toggle (index.html's
+  // [data-theme="dark"|"light"] CSS custom-property system driving
+  // everything else). src/main.js's applyTheme() sets
+  // document.documentElement.dataset.theme synchronously at module load
+  // (before this module ever runs, per script-order -- confirmed by the
+  // same reasoning threeBootstrap.js's own window.__fractureDebug-ordering
+  // comment already documents) and again on every toggle click, so reading
+  // that attribute directly (no import needed) is the same source of truth
+  // main.js's own theme()/getComputedStyle helper uses. A MutationObserver
+  // on that one attribute (not a custom event/callback wired through
+  // threeBootstrap.js) keeps this self-contained and reacts correctly no
+  // matter what triggers the change.
+  function currentTheme() {
+    return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+  }
+  // Dark: navy-charcoal top fading to near-black bottom -- a "clean neon-
+  // arcade void" rather than a lit wall, so the glowing cubes/mascots read
+  // as the scene's actual focal points against it.
+  // Light: kept deliberately UN-white (soft blue-gray, in the same family as
+  // index.html's light-theme --canvas-bg #eef0f4/--empty-cell #dfe2e8, just
+  // a shade moodier) -- a literal white backdrop would blow out the neon
+  // emissive/bloom entirely, so this still reads as "light theme" without
+  // fighting the glow effect it's supposed to be backing.
+  const BACKDROP_GRADIENT_STOPS = {
+    dark: ['#1b1f2c', '#12141c', '#08090c'],
+    light: ['#dde2ea', '#c7ccd6', '#aeb4c0'],
+  };
+  function makeBackdropGradientTexture(theme) {
     const canvas = document.createElement('canvas');
     canvas.width = 2;
     canvas.height = 256;
     const ctx = canvas.getContext('2d');
-    // Dark navy-charcoal top fading to near-black bottom -- a "clean neon-
-    // arcade void" rather than a lit wall, so the glowing cubes/mascots read
-    // as the scene's actual focal points against it.
+    const stops = BACKDROP_GRADIENT_STOPS[theme] || BACKDROP_GRADIENT_STOPS.dark;
     const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
-    grad.addColorStop(0, '#1b1f2c');
-    grad.addColorStop(0.55, '#12141c');
-    grad.addColorStop(1, '#08090c');
+    grad.addColorStop(0, stops[0]);
+    grad.addColorStop(0.55, stops[1]);
+    grad.addColorStop(1, stops[2]);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
     return tex;
   }
-  backdropMat.map = makeBackdropGradientTexture();
+  function applyBackdropForCurrentTheme() {
+    const tex = makeBackdropGradientTexture(currentTheme());
+    if (backdropMat.map) backdropMat.map.dispose();
+    backdropMat.map = tex;
+    backdropMat.needsUpdate = true;
+  }
+  applyBackdropForCurrentTheme();
   backdropMat.color.set(0xffffff); // let the gradient texture supply color; a tint would otherwise darken it
-  backdropMat.needsUpdate = true;
+  const backdropThemeObserver = new MutationObserver(() => applyBackdropForCurrentTheme());
+  backdropThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   // No network fetch anymore -- built synchronously above, so this always
   // resolves true immediately. Kept as a Promise (not a plain boolean) so
   // existing callers (threeBootstrap.js Promise.all(...), Playwright tests)
@@ -590,8 +641,8 @@ export function createThreeScene(container) {
   // Loaded async (GLTFLoader.loadAsync); each model's own bounding box is
   // used to normalize scale to a target on-screen height (source pack
   // meshes aren't authored to a shared scale) and to plant its feet exactly
-  // on the ledge's top surface, rather than guessing a fixed scale/offset
-  // per file.
+  // on the shared floor level (BOARD_BOTTOM_EDGE), rather than guessing a
+  // fixed scale/offset per file.
   const gltfLoader = new GLTFLoader();
   const mascots = [];
   // mascot-idle-animation: every mascot glTF ships baked animation clips
@@ -612,44 +663,47 @@ export function createThreeScene(container) {
         const scale = size.y > 0 ? cfg.targetHeight / size.y : 1;
         root.scale.setScalar(scale);
 
-        // Re-measure after scaling to plant feet on the ledge precisely
-        // (bounding box min.y is the model's lowest point post-scale).
+        // mascot-side-placement (2026-07-29, supersedes mascot-head-tilt):
+        // now that mascots stand BESIDE the board instead of below it
+        // facing the camera, the old "pitch just the head bone up" pose
+        // doesn't make sense -- what reads correctly here is turning the
+        // WHOLE body to face inward, toward the grid, like a figure flanking
+        // a display case. Loaded models face the camera (+Z) at identity
+        // rotation (confirmed during the original below-the-board pass), so
+        // a +/-90 degree yaw around Y turns that forward vector to point at
+        // +X (facing right, for the left-side cluster) or -X (facing left,
+        // for the right-side cluster) -- applied BEFORE the post-scale
+        // bounding-box re-measure below so feetY/centerZOffset already
+        // reflect the rotated pose (a Y-axis rotation swaps the model's own
+        // X/Z footprint but leaves Y untouched, so foot height is still
+        // correct either way -- the Z-centering isn't, which is exactly why
+        // this ordering matters).
+        root.rotation.y = cfg.side < 0 ? Math.PI / 2 : -Math.PI / 2;
+
+        // Re-measure after scaling+rotating to plant feet on the shared
+        // floor level precisely (bounding box min.y is the model's lowest
+        // point).
         const scaledBox = new THREE.Box3().setFromObject(root);
         const feetY = scaledBox.min.y;
         const centerZOffset = (scaledBox.max.z + scaledBox.min.z) / 2;
-        root.position.set(cfg.x, LEDGE_TOP_Y - feetY, LEDGE_CENTER_Z + LEDGE_DEPTH / 2 - 0.15 - centerZOffset);
+        root.position.set(cfg.x, BOARD_BOTTOM_EDGE - feetY, MASCOT_STAND_Z - centerZOffset);
         root.traverse((obj) => {
           if (obj.isMesh) {
-            obj.castShadow = true;
+            // mascot-side-placement: shadow-casting OFF (was on) -- now that
+            // mascots are 3x bigger and standing out at
+            // MASCOT_CLUSTER_CENTER_X (near/outside keyLight's shadow-camera
+            // frustum, which is sized for the BOARD's own footprint,
+            // shadowExtent = BOARD_SIZE*0.9), their cast shadows clipped
+            // against that frustum boundary into a large, wrong-looking dark
+            // blob across the backdrop -- confirmed via screenshot, not
+            // assumed. A correctly-sized shadow camera for the mascots isn't
+            // worth the complexity here; still receiving shadows (so the
+            // board/ledge can shade them) reads fine without casting their
+            // own.
+            obj.castShadow = false;
             obj.receiveShadow = true;
           }
         });
-        // mascot-head-tilt (2026-07-29): mascots stand facing forward/toward
-        // the camera (unchanged -- per the brief, this is a HEAD-only pose
-        // offset, not a whole-body reorientation toward the board). Look for
-        // a bone literally named "Head" (confirmed present on all 4 source
-        // gltfs) and pitch it upward a fixed amount so they read as looking
-        // up at the grid above them; a static pose offset applied once after
-        // load, not animated, and applied BEFORE the idle mixer/action below
-        // starts playing so it composes as the skeleton's new rest pose that
-        // the Idle clip's own (unrelated) bone rotations layer on top of.
-        let headBone = null;
-        root.traverse((obj) => {
-          if (!headBone && obj.isBone && obj.name === 'Head') headBone = obj;
-        });
-        if (headBone) {
-          // Small upward pitch around the bone's local X axis. All 4 rigs
-          // share the same Quaternius convention (confirmed via the bone
-          // quaternion snapshots taken during mascot-idle-animation's own
-          // verification pass), so one fixed angle reads correctly on all of
-          // them without a per-mascot fudge factor.
-          headBone.rotateX(-0.35);
-        } else {
-          // Fallback for any mascot whose rig doesn't expose a separable
-          // Head bone -- tilt the whole model back slightly instead of
-          // skipping the "looking up" pose entirely.
-          root.rotation.x = 0.12;
-        }
         scene.add(root);
         const entry = { name: cfg.url.split('/').pop().replace('.gltf', ''), root, clips: [], actions: {}, activeAction: null, activeActionName: null, mixer: null };
         const clips = gltf.animations || [];
@@ -1214,6 +1268,7 @@ export function createThreeScene(container) {
   }
 
   function dispose() {
+    backdropThemeObserver.disconnect();
     cubeGeo.dispose();
     placeholderMat.dispose();
     emptyCellMat.dispose();

@@ -225,9 +225,21 @@ if (THREE_PREVIEW) {
     const handle = createThreeScene(wrap);
 
     function currentSize() {
-      // Match the same responsive board footprint the 2D layout uses
-      // (src/main.js computeLayout(): maxW = min(innerWidth-24, 480), square).
-      const size = Math.min(window.innerWidth - 24, 480);
+      // Mirrors the same viewport-scaling formula src/main.js's
+      // computeLayout() uses (2026-07-29: loosened from a flat
+      // min(innerWidth-24, 480) so the game scales up on larger desktop
+      // viewports instead of staying capped at a small mobile-first size) --
+      // NOT numerically identical, though, because this square IS the
+      // entire stage footprint (board+queue+tray+mascots all packed into
+      // one square canvas), whereas computeLayout()'s maxW only feeds
+      // cellSize and the 2D canvas adds ~212px of fixed queue/tray-row
+      // overhead ON TOP of that. So the height-safety subtraction here is
+      // smaller (just the header chrome above the canvas + margin, ~90px,
+      // verified against a real Playwright viewport) than computeLayout()'s
+      // 280 -- both exist for the same reason (don't let a short/wide
+      // viewport size the canvas taller than the visible window), just
+      // scaled to each renderer's own actual vertical overhead.
+      const size = Math.min(window.innerWidth - 24, window.innerHeight - 90, 720);
       return { width: size, height: size };
     }
 
