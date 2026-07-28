@@ -1,0 +1,7 @@
+seed=5149 maxTraySeen=3 turns=11 overflowEvents=0
+
+INFLATED TRAY SAMPLES:
+[]
+
+FULL LOG TAIL:
+GAME OVER: no tray piece fits anywhere on the board.

@@ -1,0 +1,51 @@
+name: iOS build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - "src/**"
+      - "assets/**"
+      - "index.html"
+      - "capacitor.config.json"
+      - "package.json"
+      - ".github/workflows/ios-build.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build-simulator:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16.2"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci
+
+      - name: Populate web assets (webDir, gitignored)
+        run: |
+          mkdir -p www
+          cp -R index.html src assets www/
+
+      - run: npx cap sync ios
+
+      - name: Build for iOS Simulator
+        run: |
+          cd ios/App
+          xcodebuild \
+            -project App.xcodeproj \
+            -scheme App \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug \
+            build
+
+      - name: Run unit tests (no engine dependency)
+        run: node tests/core.test.mjs

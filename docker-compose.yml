@@ -1,0 +1,44 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    command: ["npx", "serve", "-l", "8000", "."]
+
+  # `docker compose run --rm test` — headless unit tests (tests/core.test.mjs).
+  test:
+    build: .
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    command: ["npm", "test"]
+    profiles: ["test"]
+
+  # `docker compose run --rm drag-resize-test` — the Playwright browser
+  # regression test; it starts its own ephemeral static server internally,
+  # so it doesn't depend on the `app` service running.
+  drag-resize-test:
+    build: .
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    command: ["node", "tests/drag-resize.playwright.mjs"]
+    profiles: ["test"]
+
+  # `docker compose run --rm bake-sprites` — regenerates assets/sprites/shard-atlas.png.
+  bake-sprites:
+    build: .
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    command: ["npm", "run", "bake-sprites"]
+    profiles: ["tools"]
+
+# Named volume keeps container-installed node_modules (native Playwright
+# browsers/deps included in the base image) from being shadowed by the
+# source bind mount or leaking into the host filesystem.
+volumes:
+  node_modules:

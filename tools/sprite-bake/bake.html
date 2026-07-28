@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8" /><title>Fracture sprite bake</title></head>
+<body>
+<canvas id="atlas"></canvas>
+<script type="module">
+  import { COLORS } from '../../src/pieces.js';
+  import { ATLAS_TILE, ATLAS_VARIANTS } from '../../src/spriteAtlasConfig.js';
+  import { renderChip, makeGrainTile } from './renderChip.mjs';
+
+  const canvas = document.getElementById('atlas');
+  canvas.width = COLORS.length * ATLAS_TILE;
+  canvas.height = ATLAS_VARIANTS * ATLAS_TILE;
+  const ctx = canvas.getContext('2d');
+
+  const grain = makeGrainTile(96, 7);
+
+  for (let colIdx = 0; colIdx < COLORS.length; colIdx++) {
+    for (let row = 0; row < ATLAS_VARIANTS; row++) {
+      const cx = colIdx * ATLAS_TILE + ATLAS_TILE / 2;
+      const cy = row * ATLAS_TILE + ATLAS_TILE / 2;
+      const R = ATLAS_TILE * 0.46;
+      renderChip(ctx, cx, cy, R, COLORS[colIdx], row, grain);
+    }
+  }
+
+  // Color-depth quantization pass: no pngquant/optipng available in this
+  // environment (checked directly), so this is the manual equivalent --
+  // reduce each RGB channel to a limited number of levels before export.
+  // A browser <canvas> can only emit full RGBA truecolor PNG (no indexed
+  // export from toDataURL), so this doesn't shrink the pixel format itself,
+  // but it collapses the smooth radial-gradient fills (by far the largest
+  // contributor to atlas size -- measured directly: ~900KB of the ~1.1MB
+  // full-effects atlas comes from the base gradient alone, vs. ~290KB for
+  // an equivalent flat-fill bake) into far fewer distinct byte values,
+  // which DEFLATE then compresses much more effectively. LEVELS chosen by
+  // testing a small range (40 -> 775KB, 24 -> 615KB, 20 -> 591KB,
+  // 16 -> 504KB, 12 -> 459KB at the 8-variant tile count used during
+  // tuning) and picking 20 as the point where banding was still not
+  // visible on the actual chip art at real render sizes, before dropping
+  // ATLAS_VARIANTS 8->6 (see spriteAtlasConfig.js) for the final ~436KB.
+  const LEVELS = 20;
+  const step = 255 / (LEVELS - 1);
+  const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = id.data;
+  for (let i = 0; i < d.length; i += 4) {
+    d[i] = Math.round(Math.round(d[i] / step) * step);
+    d[i + 1] = Math.round(Math.round(d[i + 1] / step) * step);
+    d[i + 2] = Math.round(Math.round(d[i + 2] / step) * step);
+  }
+  ctx.putImageData(id, 0, 0);
+
+  window.__atlasDataURL = canvas.toDataURL('image/png');
+  window.__atlasReady = true;
+  window.__atlasMeta = { tile: ATLAS_TILE, variants: ATLAS_VARIANTS, colors: COLORS.length, w: canvas.width, h: canvas.height };
+</script>
+</body>
+</html>

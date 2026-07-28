@@ -1,0 +1,18 @@
+{
+  "name": "cube-blast",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/core.test.mjs",
+    "bake-sprites": "node tools/sprite-bake/bake.mjs"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.4.2",
+    "@capacitor/cli": "^8.4.2",
+    "@capacitor/core": "^8.4.2",
+    "@capacitor/ios": "^8.4.2",
+    "playwright": "1.62.0",
+    "serve": "^14.2.4"
+  }
+}

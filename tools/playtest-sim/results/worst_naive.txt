@@ -1,0 +1,51 @@
+seed=5149 maxTraySeen=3 turns=56 overflowEvents=0
+
+INFLATED TRAY SAMPLES:
+[]
+
+FULL LOG TAIL:
+Cleared 1 line(s) (rows:[0] cols:[]) with a #3498db tetromino_h.
+Shard queued (shard_domino_v, #3498db). Queue 1/4.
+Tray refill slot 0: drained shard from queue (shard_domino_v, #3498db). Queue 0/4.
+Cleared 1 line(s) (rows:[3] cols:[]) with a #e67e22 tetromino_v.
+Shard queued (shard_domino_h, #e67e22). Queue 1/4.
+Cleared 1 line(s) (rows:[1] cols:[]) with a #1abc9c domino_v.
+Shard queued (shard_mono, #1abc9c). Queue 2/4.
+Tray refill slot 0: drained shard from queue (shard_domino_h, #e67e22). Queue 1/4.
+Tray refill slot 1: drained shard from queue (shard_mono, #1abc9c). Queue 0/4.
+Cleared 1 line(s) (rows:[0] cols:[]) with a #1abc9c shard_mono.
+Shard queued (shard_mono, #1abc9c). Queue 1/4.
+Tray refill slot 0: drained shard from queue (shard_mono, #1abc9c). Queue 0/4.
+Cleared 1 line(s) (rows:[5] cols:[]) with a #f1c40f Z.
+Shard queued (shard_domino_v, #f1c40f). Queue 1/4.
+Tray refill slot 0: drained shard from queue (shard_domino_v, #f1c40f). Queue 0/4.
+Cleared 1 line(s) (rows:[0] cols:[]) with a #f1c40f shard_domino_v.
+Shard queued (shard_mono, #f1c40f). Queue 1/4.
+Cleared 1 line(s) (rows:[4] cols:[]) with a #f1c40f tromino_v.
+Shard queued (shard_domino_h, #f1c40f). Queue 2/4.
+Tray refill slot 0: drained shard from queue (shard_mono, #f1c40f). Queue 1/4.
+Tray refill slot 1: drained shard from queue (shard_domino_h, #f1c40f). Queue 0/4.
+Cleared 1 line(s) (rows:[1] cols:[]) with a #e67e22 domino_v.
+Shard queued (shard_domino_v, #e67e22). Queue 1/4.
+Tray refill slot 0: drained shard from queue (shard_domino_v, #e67e22). Queue 0/4.
+Cleared 1 line(s) (rows:[0] cols:[]) with a #e67e22 domino_v.
+Shard queued (shard_domino_h, #e67e22). Queue 1/4.
+Tray refill slot 0: drained shard from queue (shard_domino_h, #e67e22). Queue 0/4.
+Cleared 1 line(s) (rows:[0] cols:[]) with a #9b59b6 mono.
+Shard queued (shard_mono, #9b59b6). Queue 1/4.
+Tray refill slot 0: drained shard from queue (shard_mono, #9b59b6). Queue 0/4.
+Cleared 1 line(s) (rows:[4] cols:[]) with a #f1c40f S.
+Shard queued (shard_domino_h, #f1c40f). Queue 1/4.
+Cleared 1 line(s) (rows:[5] cols:[]) with a #9b59b6 Tv.
+Shard queued (shard_mono, #9b59b6). Queue 2/4.
+Tray refill slot 0: drained shard from queue (shard_domino_h, #f1c40f). Queue 1/4.
+Tray refill slot 1: drained shard from queue (shard_mono, #9b59b6). Queue 0/4.
+Cleared 1 line(s) (rows:[6] cols:[]) with a #3498db tromino_v.
+Shard queued (shard_domino_h, #3498db). Queue 1/4.
+Tray refill slot 0: drained shard from queue (shard_domino_h, #3498db). Queue 0/4.
+Cleared 1 line(s) (rows:[0] cols:[]) with a #2ecc71 corner.
+Shard queued (shard_mono, #2ecc71). Queue 1/4.
+Tray refill slot 0: drained shard from queue (shard_mono, #2ecc71). Queue 0/4.
+Cleared 1 line(s) (rows:[0] cols:[]) with a #9b59b6 tromino_h.
+Shard queued (shard_domino_v, #9b59b6). Queue 1/4.
+GAME OVER: no tray piece fits anywhere on the board.
