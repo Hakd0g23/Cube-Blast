@@ -36,12 +36,32 @@ function shapeExtent(cells) {
   return { rows: maxR + 1, cols: maxC + 1 };
 }
 
-function buildMiniPiece(shape, color) {
+// Square-cell sizing, ported from src/main.js's own tray/queue draw code
+// (shapeExtent + a single square `s` = min(availW/cols, availH/rows[, cap]))
+// -- the DOM overlay used to stretch each cell to fill separate 1fr grid
+// tracks per axis, which is fine for square shapes but turns a 1x3 piece
+// into three tall skinny slivers instead of three square blocks. Sizing the
+// mini container itself (in % of the slot's own design width/height, which
+// stays proportional at any responsive scale since slot aspect-ratio is
+// locked in CSS) keeps every cell square regardless of shape.
+function squareCellFraction(ext, slotDesignW, slotDesignH, marginPx, capPx) {
+  const availW = slotDesignW - marginPx;
+  const availH = slotDesignH - marginPx;
+  let s = Math.min(availW / Math.max(ext.cols, 1), availH / Math.max(ext.rows, 1));
+  if (capPx) s = Math.min(s, capPx);
+  s = Math.max(s, 1);
+  return { widthPct: ((ext.cols * s) / slotDesignW) * 100, heightPct: ((ext.rows * s) / slotDesignH) * 100 };
+}
+
+function buildMiniPiece(shape, color, slotDesignW, slotDesignH, marginPx, capPx) {
   const ext = shapeExtent(shape);
   const mini = document.createElement('div');
   mini.className = 'three-piece-mini';
   mini.style.gridTemplateColumns = `repeat(${ext.cols}, 1fr)`;
   mini.style.gridTemplateRows = `repeat(${ext.rows}, 1fr)`;
+  const { widthPct, heightPct } = squareCellFraction(ext, slotDesignW, slotDesignH, marginPx, capPx);
+  mini.style.width = `${widthPct}%`;
+  mini.style.height = `${heightPct}%`;
   for (const [r, c] of shape) {
     const cell = document.createElement('div');
     cell.className = 'three-piece-cell';
@@ -60,6 +80,15 @@ function buildMiniPiece(shape, color) {
   return mini;
 }
 
+// Design units mirroring src/main.js's QUEUE_SLOT/TRAY_SLOT_W/TRAY_SLOT_H
+// constants -- the CSS slot sizes (.three-queue-slot/.three-tray-slot) are
+// percentage-of-container but locked to these same aspect ratios via
+// max-width + aspect-ratio, so these constants stay valid as a proportional
+// reference at any responsive scale.
+const QUEUE_SLOT_DESIGN = 46;
+const TRAY_SLOT_DESIGN_W = 96;
+const TRAY_SLOT_DESIGN_H = 86;
+
 // Rebuilds the tray/shard-queue DOM overlay's slot contents from live state.
 // Full rebuild each call (no diffing) -- a handful of DOM nodes for an 8x8-
 // scale game, not a perf-sensitive path.
@@ -76,7 +105,7 @@ function renderTrayQueueOverlay(state) {
     const shard = state.shardQueue[i];
     const slot = document.createElement('div');
     slot.className = 'three-slot three-queue-slot' + (shard ? '' : ' dashed');
-    if (shard) slot.appendChild(buildMiniPiece(shard.shape, shard.color));
+    if (shard) slot.appendChild(buildMiniPiece(shard.shape, shard.color, QUEUE_SLOT_DESIGN, QUEUE_SLOT_DESIGN, 10));
     queueSlots.appendChild(slot);
   }
 
@@ -88,7 +117,7 @@ function renderTrayQueueOverlay(state) {
     const piece = state.tray[i];
     const slot = document.createElement('div');
     slot.className = 'three-slot three-tray-slot' + (piece ? '' : ' dashed');
-    if (piece) slot.appendChild(buildMiniPiece(piece.shape, piece.color));
+    if (piece) slot.appendChild(buildMiniPiece(piece.shape, piece.color, TRAY_SLOT_DESIGN_W, TRAY_SLOT_DESIGN_H, 16, 18));
     traySlots.appendChild(slot);
   }
 }
@@ -121,12 +150,27 @@ function updateFloatingPiece(clientX, clientY, piece) {
   floatingPieceEl.style.gridTemplateColumns = `repeat(${ext.cols}, 1fr)`;
   floatingPieceEl.style.gridTemplateRows = `repeat(${ext.rows}, 1fr)`;
   floatingPieceEl.innerHTML = '';
+  // Same square-cell sizing as buildMiniPiece: the floating element's outer
+  // box is a fixed 72x72 (CSS), but non-square shapes should only fill part
+  // of it, not stretch to fill both axes independently.
+  const { widthPct, heightPct } = squareCellFraction(ext, 72, 72, 0, 24);
+  const boxW = (widthPct / 100) * 72;
+  const boxH = (heightPct / 100) * 72;
+  floatingPieceEl.style.width = `${boxW}px`;
+  floatingPieceEl.style.height = `${boxH}px`;
   for (const [r, c] of piece.shape) {
     const cell = document.createElement('div');
     cell.className = 'three-piece-cell';
     cell.style.gridColumn = String(c + 1);
     cell.style.gridRow = String(r + 1);
-    cell.style.background = piece.color;
+    const family = FAMILY_BY_COLOR[piece.color];
+    if (family) {
+      cell.style.backgroundColor = piece.color;
+      cell.style.backgroundImage = `url(./assets/blocks/${family}.png)`;
+      cell.style.backgroundSize = 'cover';
+    } else {
+      cell.style.background = piece.color;
+    }
     floatingPieceEl.appendChild(cell);
   }
   // Centered on the pointer, lifted up a bit so touch input isn't hidden
@@ -134,8 +178,8 @@ function updateFloatingPiece(clientX, clientY, piece) {
   // intent as src/main.js's TOUCH_VISUAL_LIFT for the 2D drag, applied
   // unconditionally here since this floating element is always separate
   // from the pointer itself (mouse or touch alike).
-  floatingPieceEl.style.left = (clientX - 36) + 'px';
-  floatingPieceEl.style.top = (clientY - 36 - 46) + 'px';
+  floatingPieceEl.style.left = (clientX - boxW / 2) + 'px';
+  floatingPieceEl.style.top = (clientY - boxH / 2 - 46) + 'px';
 }
 
 function removeFloatingPiece() {
