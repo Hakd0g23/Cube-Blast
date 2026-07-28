@@ -275,6 +275,54 @@ if (THREE_PREVIEW) {
       endDrag();
     });
 
+    // ---- juice-effects-port (2026-07-28) -----------------------------------
+    // Registers the hooks src/main.js's performPlacement/checkMilestone/
+    // refreshChrome call (unconditionally, but as inert optional-chained
+    // no-ops when this file's THREE_PREVIEW gate is off) -- this is the SAME
+    // trigger point real 2D pointer-drag input and 3D input-raycasting's
+    // debug.placePiece() commit both already funnel through, so no placement/
+    // clear logic is duplicated here, only the resulting cosmetic effects.
+    function queueSlotTargetsWorld(queueLenBefore, newlyQueued) {
+      const slotEls = document.querySelectorAll('#three-queue-slots .three-slot');
+      const targets = [];
+      for (let i = 0; i < newlyQueued; i++) {
+        const el = slotEls[queueLenBefore + i];
+        if (!el) continue; // matches 2D's own "skip if no queue slot" scope cut (overflow shard went straight to tray)
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const world = handle.pointerToBoardXY(cx, cy);
+        if (world) targets.push(world);
+      }
+      return targets;
+    }
+
+    window.__threeJuiceHooks = {
+      onPlacement(payload) {
+        handle.triggerLandingAnim(payload.cells, payload.r0, payload.c0);
+        if (payload.lineCount > 0 && payload.newlyQueued > 0) {
+          // Force the DOM queue-slot overlay to reflect the just-committed
+          // state BEFORE reading its slot positions -- this hook fires
+          // synchronously inside performPlacement, ahead of this file's own
+          // next rAF-driven syncFromGameState() call, so the overlay could
+          // otherwise still show the pre-placement queue for one frame.
+          syncFromGameState();
+          const targets = queueSlotTargetsWorld(payload.queueLenBefore, payload.newlyQueued);
+          handle.triggerShardArc(payload.rows, payload.cols, payload.color, payload.bigClear, targets);
+        }
+        if (payload.lineCount > 0 && payload.bigClear) {
+          handle.triggerGoldFlash(); // default duration, matches main.js's GOLD_FLASH_MS
+          if (payload.lineCount >= 3) handle.triggerZoomPulse();
+        }
+      },
+      onMilestone() {
+        handle.triggerGoldFlash(120); // matches main.js's MILESTONE_FLASH_MS
+      },
+      onDeathSequence() {
+        handle.triggerDeathSequence();
+      },
+    };
+
     // Verification/QA hook, matching the existing window.__fractureDebug
     // pattern (src/main.js) so headless/windowed Playwright scripts can
     // assert on scene contents without scraping internals ad hoc.
@@ -322,6 +370,15 @@ if (THREE_PREVIEW) {
       dragAnchor: () => (threeDrag ? { r: threeDrag.anchor?.r, c: threeDrag.anchor?.c, valid: threeDrag.valid } : null),
       previewVisibleCount: () => handle.previewMeshes.filter((m) => m.visible).length,
       floatingPieceVisible: () => !!document.getElementById('three-drag-floating-piece'),
+      // juice-effects-port additions:
+      landingAnimCount: () => handle.landingAnimCount(),
+      shardArcCount: () => handle.shardArcCount(),
+      isGoldFlashActive: () => handle.isGoldFlashActive(),
+      isZoomPulseActive: () => handle.isZoomPulseActive(),
+      isDeathSequenceActive: () => handle.isDeathSequenceActive(),
+      boardGroupScale: () => handle.boardGroupScale(),
+      boardGroupPosition: () => handle.boardGroupPosition(),
+      cubeColor: (r, c) => handle.cubeColor(r, c),
     };
   }
 }

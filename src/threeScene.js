@@ -29,6 +29,12 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { BOARD_SIZE } from './pieces.js';
 import { BLOCK_MAP_PATH, FAMILY_BY_COLOR } from './blockTextureConfig.js';
+// juice-effects-port: reuse the SAME pause-safe virtual clock ux-loading-pass
+// built for the 2D renderer (src/main.js) rather than creating a second one --
+// every timing calculation below reads through this single vnow(), so
+// pause/resume correctness (setPaused()/isPaused() in main.js) carries over
+// for free, exactly like it does for the 2D juice effects.
+import { vnow } from './main.js';
 
 export const CELL_PX = 56;
 export const GUTTER_PX = 4;
@@ -47,6 +53,29 @@ const BOARD_HALF = (BOARD_SIZE - 1) / 2;
 const CAMERA_DISTANCE = BOARD_SIZE * 1.35;
 const FRUSTUM_MARGIN = 1.25; // extra headroom so the board doesn't clip frustum edges
 const BACKDROP_DEPTH = BOARD_SIZE * 0.75; // how far behind the board plane the backdrop wall sits
+
+// ---- juice-effects-port constants (workstream: juice-effects-port) --------
+// Ported 1:1 from src/main.js's GDD-12 juice-pass numbers (same durations/
+// magnitudes, just converted from px to world units via WORLD_UNITS_PER_PX
+// where the 2D version was px-based). Kept as separate constants in this
+// module (not imported from main.js) since main.js doesn't export its own
+// internal timing constants -- these are intentionally duplicated NUMBERS,
+// not duplicated LOGIC; the single source of truth for "should this number
+// ever change" is still GDD section 12.
+const DROP_IN_MS = 90;
+const SQUASH_MS = 120;
+const DROP_IN_PX = 10;
+const SHARD_ARC_MS = 220;
+const SHARD_LAND_SQUASH_MS = 100;
+const GOLD_FLASH_MS = 150;
+const MILESTONE_FLASH_MS = 120;
+const ZOOM_PULSE_MS = 220;
+const SHIMMER_PERIOD_MS = 3000;
+const DEATH_DESATURATE_MS = 300;
+const DEATH_SHAKE_MS = 300;
+const DEATH_SHAKE_PX = 6;
+const DEATH_FREEZE_MS = 120;
+const GOLD_HEX = 0xf4c430; // literal #F4C430, same as main.js's GOLD constant
 
 // ---- mascot-prop-placement (workstream: mascot-prop-placement) ------------
 // Per progress.md's threejs-scene-camera-setup rework notes: the reference
@@ -223,13 +252,21 @@ export function createThreeScene(container) {
   // textures finish loading below (async), same first-paint fallback
   // contract as the backdrop above and as render-swap's 2D drawBlockCell().
   const placeholderMat = new THREE.MeshStandardMaterial({ color: 0x8fa3b8, roughness: 0.85, metalness: 0.05 });
+  // juice-effects-port: all 64 cube meshes live under one Group so the zoom
+  // pulse (GDD 12.4, board scales 1.0->1.03->1.0) and the death-sequence
+  // shake (GDD 12.8, 6px/300ms-decay) can be applied as a single group
+  // transform without touching the backdrop/ledge/mascots, which shouldn't
+  // participate in either effect.
+  const boardGroup = new THREE.Group();
+  scene.add(boardGroup);
   const cubes = [];
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
       const cube = new THREE.Mesh(cubeGeo, placeholderMat);
       // Row 0 is the top of the board on screen, so row increases downward
       // in board-space but Y increases upward in world-space — flip r here.
-      cube.position.set((c - BOARD_HALF) * CELL_STRIDE, (BOARD_HALF - r) * CELL_STRIDE, CUBE_HEIGHT / 2);
+      const baseY = (BOARD_HALF - r) * CELL_STRIDE;
+      cube.position.set((c - BOARD_HALF) * CELL_STRIDE, baseY, CUBE_HEIGHT / 2);
       cube.castShadow = true;
       cube.receiveShadow = true;
       // Hidden until the first real board-state sync (gameplay-state-wiring)
@@ -238,8 +275,15 @@ export function createThreeScene(container) {
       // color, per the "empty cell -> hidden/dim" fallback contract this
       // workstream's brief calls for.
       cube.visible = false;
-      scene.add(cube);
-      cubes.push({ r, c, mesh: cube, family: null });
+      boardGroup.add(cube);
+      // baseY/baseMat/ownMaterial/baseColor are juice-effects-port additions:
+      // baseY is the cube's resting Y (landing drop-in animates away from and
+      // back to this); ownMaterial is a lazily-created per-cube clone of
+      // whichever shared family material this cell currently uses, so idle
+      // shimmer (GDD 12.6) and death desaturation (GDD 12.8) can vary the
+      // clone's own .color per cube without mutating the shared family
+      // material every other cube of that family also uses.
+      cubes.push({ r, c, mesh: cube, family: null, baseY, baseMat: null, ownMaterial: null, baseColor: null });
     }
   }
 
@@ -341,7 +385,20 @@ export function createThreeScene(container) {
       entry.mesh.visible = true;
       const familyName = FAMILY_BY_COLOR[cell.color] || null;
       const chosen = familyName ? familyByName.get(familyName) : null;
-      entry.mesh.material = chosen ? chosen.mat : placeholderMat;
+      const baseMat = chosen ? chosen.mat : placeholderMat;
+      // juice-effects-port: only (re)clone when the underlying family
+      // material actually changed for this cell (new placement, or a color
+      // swap once materials finish loading) -- this function is called every
+      // rAF frame by threeBootstrap's syncFromGameState(), so cloning
+      // unconditionally here would allocate + leak a new Material every
+      // frame for every occupied cell.
+      if (entry.baseMat !== baseMat) {
+        if (entry.ownMaterial) entry.ownMaterial.dispose();
+        entry.baseMat = baseMat;
+        entry.ownMaterial = baseMat.clone();
+        entry.baseColor = entry.ownMaterial.color.clone();
+        entry.mesh.material = entry.ownMaterial;
+      }
       entry.family = chosen ? chosen.name : null;
     }
   }
@@ -359,6 +416,31 @@ export function createThreeScene(container) {
   ledge.castShadow = true;
   ledge.receiveShadow = true;
   scene.add(ledge);
+
+  // ---- juice-effects-port: gold flash overlay (GDD 12.3/12.4) -----------
+  // A single translucent gold plane sitting just in front of the cube faces,
+  // toggled/faded via triggerGoldFlash() below -- literal #F4C430 at up to
+  // 25% alpha, same numbers as main.js's 2D board-wide fillRect flash, just
+  // as a real mesh instead of a canvas fill.
+  const goldFlashGeo = new THREE.PlaneGeometry(BOARD_SIZE * CELL_STRIDE, BOARD_SIZE * CELL_STRIDE);
+  const goldFlashMat = new THREE.MeshBasicMaterial({
+    color: GOLD_HEX,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+  });
+  const goldFlashMesh = new THREE.Mesh(goldFlashGeo, goldFlashMat);
+  goldFlashMesh.position.z = CUBE_HEIGHT + 0.04; // in front of cube faces, behind the placement-preview layer (0.06)
+  goldFlashMesh.visible = false;
+  boardGroup.add(goldFlashMesh);
+
+  // ---- juice-effects-port: shard chip geometry (GDD 12.2/7) -------------
+  // Small chip mesh reused for every in-flight shard arc -- each arc gets its
+  // own Mesh+Material instance (cheap, few concurrent arcs at a time) so
+  // per-arc opacity/scale (the landing squash pulse) doesn't fight other
+  // concurrently-flying arcs sharing one material.
+  const SHARD_CHIP_WORLD = 16 * WORLD_UNITS_PER_PX; // matches 2D drawShardArcs' `size=16` chip footprint
+  const shardChipGeo = new THREE.BoxGeometry(SHARD_CHIP_WORLD, SHARD_CHIP_WORLD, CUBE_HEIGHT * 0.3);
 
   // ---- mascot props (static/non-rigged Quaternius glTF, GDD 4A) ---------
   // Loaded async (GLTFLoader.loadAsync); each model's own bounding box is
@@ -473,6 +555,223 @@ export function createThreeScene(container) {
     for (const mesh of previewMeshes) mesh.visible = false;
   }
 
+  // ==== juice-effects-port (workstream: juice-effects-port) ================
+  // Re-ports every GDD-12 effect src/main.js's 2D juice-pass built, as real
+  // Three.js mesh transforms/material changes instead of canvas draws. Every
+  // timing calculation below reads through the imported vnow() (main.js) --
+  // the SAME pause-safe virtual clock the 2D effects use -- so pause/resume
+  // freezes these too, for free, with no extra bookkeeping here. All of this
+  // runs from render() below (called every rAF frame by threeBootstrap's
+  // loop()), matching this scene's existing "poll every frame" convention
+  // (gameplay-state-wiring's setBoardState) rather than adding a second,
+  // separate ticker system.
+
+  // ---- 12.1/12.2: landing drop-in + squash-and-settle --------------------
+  const landingAnims = new Map(); // key `${r},${c}` -> { startedAt }
+  function triggerLandingAnim(cells, r0, c0) {
+    const now = vnow();
+    for (const [dr, dc] of cells) landingAnims.set(`${r0 + dr},${r0 + dc}`, { startedAt: now });
+  }
+  function updateLandingAnims(now) {
+    for (const entry of cubes) {
+      const key = `${entry.r},${entry.c}`;
+      const anim = landingAnims.get(key);
+      if (!anim) {
+        entry.mesh.position.y = entry.baseY;
+        if (entry.mesh.scale.x !== 1 || entry.mesh.scale.y !== 1) entry.mesh.scale.set(1, 1, 1);
+        continue;
+      }
+      const elapsed = now - anim.startedAt;
+      if (elapsed > DROP_IN_MS + SQUASH_MS) {
+        landingAnims.delete(key);
+        entry.mesh.position.y = entry.baseY;
+        entry.mesh.scale.set(1, 1, 1);
+        continue;
+      }
+      if (elapsed < DROP_IN_MS) {
+        const t = elapsed / DROP_IN_MS;
+        const eased = 1 - (1 - t) * (1 - t); // ease-out, matches main.js landingTransformFor
+        const offsetWorld = DROP_IN_PX * WORLD_UNITS_PER_PX * (1 - eased);
+        entry.mesh.position.y = entry.baseY + offsetWorld; // starts above resting Y, eases down into place
+        entry.mesh.scale.set(1, 1, 1);
+      } else {
+        const st = Math.min(1, (elapsed - DROP_IN_MS) / SQUASH_MS);
+        const dip = Math.sin(st * Math.PI) * 0.06; // 1.0 -> 0.94 -> 1.0
+        entry.mesh.position.y = entry.baseY;
+        entry.mesh.scale.set(1 + dip * 0.5, 1 - dip, 1);
+      }
+    }
+  }
+
+  // ---- 12.2/7: shard arc from cleared line to its shard-queue slot -------
+  // Source position is derived the same way main.js's performPlacement
+  // computes it (average of each cleared row's board-center-X point and each
+  // cleared col's board-center-Y point), just in world units with the board
+  // centered on the origin instead of canvas px with layout.gridX/Y offsets.
+  const shardArcs = []; // { mesh, fromX, fromY, toX, toY, startedAt, slowFactor }
+  function shardArcSourceWorld(rows, cols) {
+    const points = [];
+    for (const r of rows) points.push({ x: 0, y: (BOARD_HALF - r) * CELL_STRIDE });
+    for (const c of cols) points.push({ x: (c - BOARD_HALF) * CELL_STRIDE, y: 0 });
+    if (!points.length) return { x: 0, y: 0 };
+    return {
+      x: points.reduce((s, p) => s + p.x, 0) / points.length,
+      y: points.reduce((s, p) => s + p.y, 0) / points.length,
+    };
+  }
+  function triggerShardArc(rows, cols, colorHex, bigClear, targetsWorld) {
+    if (!targetsWorld.length) return;
+    const now = vnow();
+    const from = shardArcSourceWorld(rows, cols);
+    // GDD 12.4 time-dilation on a big clear -- same 1.8x stretch main.js uses.
+    const slowFactor = bigClear ? 1.8 : 1;
+    const familyName = FAMILY_BY_COLOR[colorHex] || null;
+    const famEntry = familyName ? familyByName.get(familyName) : null;
+    for (const target of targetsWorld) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: famEntry ? 0xffffff : new THREE.Color(colorHex),
+        map: famEntry ? famEntry.mat.map : null,
+        transparent: true,
+      });
+      const mesh = new THREE.Mesh(shardChipGeo, mat);
+      mesh.position.set(from.x, from.y, CUBE_HEIGHT + 0.08);
+      scene.add(mesh);
+      shardArcs.push({ mesh, fromX: from.x, fromY: from.y, toX: target.x, toY: target.y, startedAt: now, slowFactor });
+    }
+  }
+  function updateShardArcs(now) {
+    for (let i = shardArcs.length - 1; i >= 0; i--) {
+      const a = shardArcs[i];
+      const arcDur = SHARD_ARC_MS * a.slowFactor;
+      const totalDur = arcDur + SHARD_LAND_SQUASH_MS * a.slowFactor;
+      const elapsed = now - a.startedAt;
+      if (elapsed >= totalDur) {
+        scene.remove(a.mesh);
+        a.mesh.material.dispose(); // never disposes .map -- that's the shared family texture
+        shardArcs.splice(i, 1);
+        continue;
+      }
+      if (elapsed < arcDur) {
+        const t = elapsed / arcDur;
+        const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // ease-in-out, matches main.js drawShardArcs
+        const x = a.fromX + (a.toX - a.fromX) * eased;
+        const y = a.fromY + (a.toY - a.fromY) * eased;
+        const arcHeightWorld = 26 * WORLD_UNITS_PER_PX; // matches main.js's arcHeight=26px
+        const yArc = y + Math.sin(eased * Math.PI) * arcHeightWorld; // +Y is "up" in this world, so the arc peak adds +Y
+        a.mesh.position.set(x, yArc, CUBE_HEIGHT + 0.08);
+        a.mesh.scale.set(1, 1, 1);
+        a.mesh.material.opacity = 1;
+      } else {
+        const st = Math.min(1, (elapsed - arcDur) / (SHARD_LAND_SQUASH_MS * a.slowFactor));
+        const scale = 1 + Math.sin(st * Math.PI) * 0.35; // landing squash pulse
+        a.mesh.position.set(a.toX, a.toY, CUBE_HEIGHT + 0.08);
+        a.mesh.scale.set(scale, scale, 1);
+        a.mesh.material.opacity = Math.max(0, 1 - st);
+      }
+    }
+  }
+
+  // ---- 12.3/12.4: gold flash + zoom pulse --------------------------------
+  let goldFlash = null; // { startedAt, duration }
+  function triggerGoldFlash(duration = GOLD_FLASH_MS) {
+    goldFlash = { startedAt: vnow(), duration };
+  }
+  function updateGoldFlash(now) {
+    if (!goldFlash) {
+      if (goldFlashMesh.visible) goldFlashMesh.visible = false;
+      return;
+    }
+    const life = 1 - (now - goldFlash.startedAt) / goldFlash.duration;
+    if (life <= 0) {
+      goldFlash = null;
+      goldFlashMesh.visible = false;
+      return;
+    }
+    goldFlashMesh.visible = true;
+    goldFlashMesh.material.opacity = Math.max(0, Math.min(1, life)) * 0.25; // matches main.js's 25% max alpha
+  }
+
+  let zoomPulse = null; // { startedAt }
+  function triggerZoomPulse() {
+    zoomPulse = { startedAt: vnow() };
+  }
+
+  // ---- 12.8: death sequence (desaturate -> shake -> freeze-frame) --------
+  let deathSeq = null; // { startedAt }
+  function triggerDeathSequence() {
+    deathSeq = { startedAt: vnow() };
+  }
+  function deathDesaturateAmount(now) {
+    if (!deathSeq) return 0;
+    return Math.max(0, Math.min(1, (now - deathSeq.startedAt) / DEATH_DESATURATE_MS));
+  }
+  function isDeathFreezeActive(now) {
+    if (!deathSeq) return false;
+    const elapsed = now - deathSeq.startedAt;
+    const freezeStart = DEATH_DESATURATE_MS + DEATH_SHAKE_MS;
+    const freezeEnd = freezeStart + DEATH_FREEZE_MS;
+    if (elapsed >= freezeEnd) {
+      // Sequence fully complete -- reset, same as main.js's own
+      // `deathSeq = null` once its ticker finishes (deathDesaturateAmount
+      // reverts to 0 automatically from here on, matching the 2D behavior of
+      // the board reverting right as the Game Over overlay fades in on top).
+      deathSeq = null;
+      return false;
+    }
+    return elapsed >= freezeStart && elapsed < freezeEnd;
+  }
+
+  // Combined per-frame update for zoom scale + death-sequence board-group
+  // shake -- both are board-group-level transforms, applied together so one
+  // function owns boardGroup.scale/position each frame.
+  function updateZoomAndShake(now) {
+    let zoomScale = 1;
+    if (zoomPulse) {
+      const t = (now - zoomPulse.startedAt) / ZOOM_PULSE_MS;
+      if (t >= 1) {
+        zoomPulse = null;
+      } else {
+        zoomScale = 1 + Math.sin(t * Math.PI) * 0.03; // 1.0 -> 1.03 -> 1.0
+      }
+    }
+    boardGroup.scale.set(zoomScale, zoomScale, 1);
+
+    let sx = 0, sy = 0;
+    if (deathSeq) {
+      const elapsed = now - deathSeq.startedAt;
+      if (elapsed >= DEATH_DESATURATE_MS && elapsed < DEATH_DESATURATE_MS + DEATH_SHAKE_MS) {
+        const t = (elapsed - DEATH_DESATURATE_MS) / DEATH_SHAKE_MS;
+        const falloff = 1 - t; // linear decay, matches main.js's currentShakeOffset
+        const magnitude = DEATH_SHAKE_PX * WORLD_UNITS_PER_PX * falloff;
+        const angle = Math.random() * Math.PI * 2;
+        sx = Math.cos(angle) * magnitude;
+        sy = Math.sin(angle) * magnitude;
+      }
+    }
+    boardGroup.position.set(sx, sy, 0);
+  }
+
+  // ---- 12.6: idle shimmer, and the death-desaturate wash, both per-cube --
+  // Applied to each cube's own material clone's .color (see setBoardState's
+  // ownMaterial cloning above) so every placed cube shimmers on its own
+  // phase-offset sine wave, exactly like main.js's per-cell shimmerAlphaFor.
+  const scratchColor = new THREE.Color();
+  function updateCubeVisuals(now) {
+    const desat = deathDesaturateAmount(now);
+    for (const entry of cubes) {
+      if (!entry.mesh.visible || !entry.ownMaterial || !entry.baseColor) continue;
+      const phase = (entry.r * 7 + entry.c * 13) % 1000; // per-cell phase offset, matches main.js shimmerAlphaFor
+      const t = ((now + phase) % SHIMMER_PERIOD_MS) / SHIMMER_PERIOD_MS;
+      const shimmer = Math.sin(t * Math.PI * 2) * 0.02; // +-2% brightness
+      scratchColor.copy(entry.baseColor).multiplyScalar(1 + shimmer);
+      if (desat > 0) {
+        const gray = scratchColor.r * 0.299 + scratchColor.g * 0.587 + scratchColor.b * 0.114;
+        scratchColor.lerp(new THREE.Color(gray, gray, gray), desat);
+      }
+      entry.ownMaterial.color.copy(scratchColor);
+    }
+  }
+
   function resize(width, height) {
     const aspect = width / Math.max(1, height);
     const halfExtent = (BOARD_SIZE / 2 + 0.5) * FRUSTUM_MARGIN;
@@ -486,6 +785,18 @@ export function createThreeScene(container) {
   }
 
   function render() {
+    // juice-effects-port: advance every vnow()-keyed effect once per frame,
+    // BEFORE the actual GPU render call -- this is what makes pause/resume
+    // freeze all of it: while main.js's isPaused is true, vnow() is pinned,
+    // so every one of these updates computes the exact same values every
+    // frame and nothing visibly advances.
+    const now = vnow();
+    updateLandingAnims(now);
+    updateShardArcs(now);
+    updateGoldFlash(now);
+    updateZoomAndShake(now);
+    updateCubeVisuals(now);
+    if (isDeathFreezeActive(now)) return; // GDD 12.8 freeze-frame: skip this render call entirely, same as main.js's draw()-skip
     renderer.render(scene, camera);
   }
 
@@ -496,6 +807,16 @@ export function createThreeScene(container) {
       if (mat.map) mat.map.dispose();
       mat.dispose();
     });
+    for (const entry of cubes) {
+      if (entry.ownMaterial) entry.ownMaterial.dispose();
+    }
+    for (const a of shardArcs) {
+      scene.remove(a.mesh);
+      a.mesh.material.dispose();
+    }
+    shardChipGeo.dispose();
+    goldFlashGeo.dispose();
+    goldFlashMat.dispose();
     if (backdropMat.map) backdropMat.map.dispose();
     backdropGeo.dispose();
     backdropMat.dispose();
@@ -534,5 +855,24 @@ export function createThreeScene(container) {
     backdropTextureLoaded,
     isMaterialsFailed: () => materialsFailed,
     isBackdropTextureFailed: () => backdropTextureFailed,
+    // juice-effects-port additions:
+    boardGroup,
+    triggerLandingAnim,
+    triggerShardArc,
+    triggerGoldFlash,
+    triggerZoomPulse,
+    triggerDeathSequence,
+    // verification-only getters (window.__threeDebug wires these up):
+    landingAnimCount: () => landingAnims.size,
+    shardArcCount: () => shardArcs.length,
+    isGoldFlashActive: () => !!goldFlash,
+    isZoomPulseActive: () => !!zoomPulse,
+    isDeathSequenceActive: () => !!deathSeq,
+    boardGroupScale: () => boardGroup.scale.x,
+    boardGroupPosition: () => ({ x: boardGroup.position.x, y: boardGroup.position.y }),
+    cubeColor: (r, c) => {
+      const entry = cubes.find((e) => e.r === r && e.c === c);
+      return entry && entry.ownMaterial ? entry.ownMaterial.color.getHexString() : null;
+    },
   };
 }

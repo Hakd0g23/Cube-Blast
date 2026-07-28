@@ -233,7 +233,11 @@ let isPaused = false;
 let pauseStartedAt = null; // real performance.now() at the moment pause began, else null
 let pauseAccumMs = 0; // total real time spent paused so far, subtracted out of vnow()
 
-function vnow() {
+// Exported so juice-effects-port's Three.js effects (src/threeScene.js) can
+// import and reuse this SAME clock instance instead of creating a second one
+// -- pause/resume correctness for the 3D juice effects depends on this being
+// the one real vnow(), not a duplicate.
+export function vnow() {
   return (pauseStartedAt !== null ? pauseStartedAt : performance.now()) - pauseAccumMs;
 }
 
@@ -684,6 +688,10 @@ function checkMilestone(prevScore, newScore) {
     void scoreVal.offsetWidth;
     scoreVal.classList.add('milestone-pop');
     triggerGoldFlash(MILESTONE_FLASH_MS);
+    // juice-effects-port: matching 3D gold flash for the milestone moment
+    // (the DOM `.milestone-pop` score pop itself stays DOM per GDD 4A -- see
+    // progress.md's juice-effects-port brief).
+    window.__threeJuiceHooks?.onMilestone();
   }
 }
 
@@ -1357,12 +1365,18 @@ function performPlacement(trayIndex, targetR, targetC) {
       // BEFORE refreshChrome/clear-line flash so a placement that both lands
       // and immediately clears shows both effects, land first.
       triggerLandFlash(piece.shape, targetR, targetC, piece.color);
+      // juice-effects-port: hoisted out of the `if (res.lineCount > 0)` block
+      // below so the __threeJuiceHooks.onPlacement call at the end of this
+      // function (same trigger point real 2D input AND 3D input-raycasting's
+      // debug.placePiece() both funnel through) can report them regardless.
+      let bigClear = false;
+      let newlyQueued = 0;
       if (res.lineCount > 0) {
         // GDD 12.3: "big-clear" reward = clears >=3 lines at once OR leaves
         // the board nearly empty (<=2 occupied cells after the clear).
         let occupiedAfter = 0;
         for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) if (state.board[r][c]) occupiedAfter++;
-        const bigClear = res.lineCount >= 3 || occupiedAfter <= 2;
+        bigClear = res.lineCount >= 3 || occupiedAfter <= 2;
 
         triggerClearFlash(res.rows, res.cols, piece.color);
         playLineClear(res.lineCount);
@@ -1374,7 +1388,7 @@ function performPlacement(trayIndex, targetR, targetC) {
         // arc into, so it's skipped here (core.js's own tray-insert already
         // handles that path; this is cosmetic-only and never re-derives
         // queue/tray placement).
-        const newlyQueued = Math.max(0, state.shardQueue.length - queueLenBefore);
+        newlyQueued = Math.max(0, state.shardQueue.length - queueLenBefore);
         if (newlyQueued > 0) {
           const bx = layout.gridX, by = layout.gridY;
           const points = [];
@@ -1409,6 +1423,17 @@ function performPlacement(trayIndex, targetR, targetC) {
       }
       checkMilestone(scoreBefore, state.score); // GDD 12.7
       refreshChrome();
+      // juice-effects-port: this is the ONE trigger point both real 2D
+      // pointer-drag input (endDrag below) and 3D input-raycasting's
+      // debug.placePiece()-based commit both funnel through -- so the 3D
+      // scene's own juice effects (src/threeScene.js) hook in here rather
+      // than duplicating any placement/clear logic. Inert no-op unless
+      // threeBootstrap.js has registered hooks (only happens under ?three=1).
+      window.__threeJuiceHooks?.onPlacement({
+        cells: piece.shape, r0: targetR, c0: targetC, color: piece.color,
+        lineCount: res.lineCount, rows: res.rows, cols: res.cols,
+        queueLenBefore, newlyQueued, bigClear,
+      });
   }
   return res;
 }
@@ -1496,6 +1521,9 @@ function refreshChrome() {
       triggerDeathSequence(() => {
         overlay.classList.add('show');
       });
+      // juice-effects-port: fires the matching 3D desaturate->shake->freeze
+      // sequence in lockstep (both read the same vnow() start instant).
+      window.__threeJuiceHooks?.onDeathSequence();
     }
   }
   ingestPendingCallouts(state);
