@@ -141,7 +141,29 @@
     align-items: center; justify-content: center; gap: 12px;
     background: var(--overlay-bg); border-radius: 8px;
   }
-  #overlay.show { display: flex; }
+  #overlay.show { display: flex; animation: overlayFadeIn 180ms ease-out; }
+  @keyframes overlayFadeIn { from { opacity: 0; } to { opacity: 1; } }
+  /* GDD 10/11: pause overlay -- dims the board and centers the resume hint.
+     Separate element from #overlay (Game Over) so the two states can never
+     visually collide/stack; only one of the two is ever toggled 'show' at a
+     time since pausing is blocked whenever state.gameOver is true. */
+  #pauseOverlay {
+    position: absolute; inset: 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 6px;
+    background: var(--overlay-bg); border-radius: 8px; pointer-events: none;
+  }
+  #pauseOverlay.show { display: flex; animation: overlayFadeIn 180ms ease-out; }
+  #pauseOverlay .pause-title { margin: 0; font-size: 20px; font-weight: 700; color: var(--fg); }
+  #controlHint {
+    font-size: 12px; color: var(--muted); text-align: center; margin: 6px 0 0;
+  }
+  /* GDD 12.7: milestone score pop, scale 1.0->1.2->1.0 over 250ms with a gold glow. */
+  #scoreVal.milestone-pop { animation: scoreMilestonePop 250ms ease-out; display: inline-block; }
+  @keyframes scoreMilestonePop {
+    0% { transform: scale(1); text-shadow: none; }
+    50% { transform: scale(1.2); text-shadow: 0 0 8px #F4C430, 0 0 14px #F4C430; }
+    100% { transform: scale(1); text-shadow: none; }
+  }
   #overlay h2 { margin: 0; font-size: 22px; color: var(--fg); }
   #bestDelta { font-size: 13px; color: var(--muted); }
   #bestDelta.new-best { color: var(--accent); font-weight: 600; }
@@ -208,6 +230,9 @@
 
     <div id="stage-wrap">
       <canvas id="stage"></canvas>
+      <div id="pauseOverlay">
+        <div class="pause-title">Paused — press P to resume</div>
+      </div>
       <div id="overlay">
         <h2>Game Over</h2>
         <div id="finalScore"></div>
@@ -221,8 +246,14 @@
       </div>
     </div>
 
+    <!-- GDD 11 "Playing"/13: persistent control hint shown under the tray
+         during play (distinct from the How-to-play panel's one-line hint
+         below, which is shown regardless of game state). -->
+    <div id="controlHint">Drag a block onto the grid • Fill a row/column to clear • P or Esc to pause</div>
+
     <div id="legend">
       <b>How to play</b>
+      <p style="margin: 4px 0; font-size: 12px; color: var(--muted);">Drag blocks from the tray onto the grid. Fill a full row or column to clear it. Press P or Esc to pause.</p>
       <ul>
         <li>Drag a piece from the tray (bottom row) onto the grid.</li>
         <li>Filling a full row or column clears it and scatters 1–3 colored

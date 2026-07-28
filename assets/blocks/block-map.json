@@ -1,0 +1,102 @@
+{
+  "tileSize": 56,
+  "atlasPath": "assets/blocks/block-atlas.png",
+  "families": {
+    "dirt_brown": {
+      "hex": "#7C5A3A",
+      "individualPath": "assets/blocks/dirt_brown.png",
+      "atlas": {
+        "x": 0,
+        "y": 0,
+        "w": 56,
+        "h": 56,
+        "col": 0,
+        "row": 0
+      }
+    },
+    "grass_green": {
+      "hex": "#6AB04C",
+      "individualPath": "assets/blocks/grass_green.png",
+      "atlas": {
+        "x": 56,
+        "y": 0,
+        "w": 56,
+        "h": 56,
+        "col": 1,
+        "row": 0
+      }
+    },
+    "stone_gray": {
+      "hex": "#8E8E8E",
+      "individualPath": "assets/blocks/stone_gray.png",
+      "atlas": {
+        "x": 112,
+        "y": 0,
+        "w": 56,
+        "h": 56,
+        "col": 2,
+        "row": 0
+      }
+    },
+    "brick_red": {
+      "hex": "#C0392B",
+      "individualPath": "assets/blocks/brick_red.png",
+      "atlas": {
+        "x": 168,
+        "y": 0,
+        "w": 56,
+        "h": 56,
+        "col": 3,
+        "row": 0
+      }
+    },
+    "planks_tan": {
+      "hex": "#C9A24B",
+      "individualPath": "assets/blocks/planks_tan.png",
+      "atlas": {
+        "x": 224,
+        "y": 0,
+        "w": 56,
+        "h": 56,
+        "col": 4,
+        "row": 0
+      }
+    },
+    "diamond_cyan": {
+      "hex": "#4AA3DF",
+      "individualPath": "assets/blocks/diamond_cyan.png",
+      "atlas": {
+        "x": 280,
+        "y": 0,
+        "w": 56,
+        "h": 56,
+        "col": 5,
+        "row": 0
+      }
+    },
+    "amethyst_purple": {
+      "hex": "#B84AD1",
+      "individualPath": "assets/blocks/amethyst_purple.png",
+      "atlas": {
+        "x": 336,
+        "y": 0,
+        "w": 56,
+        "h": 56,
+        "col": 6,
+        "row": 0
+      }
+    },
+    "gold_yellow": {
+      "hex": "#F4C430",
+      "individualPath": "assets/blocks/gold_yellow.png",
+      "atlas": {
+        "x": 392,
+        "y": 0,
+        "w": 56,
+        "h": 56,
+        "col": 7,
+        "row": 0
+      }
+    }
+  }
+}

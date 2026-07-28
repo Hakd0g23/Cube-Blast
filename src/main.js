@@ -6,6 +6,7 @@
 import { createGame, placePiece, canPlaceAt, mulberry32, QUEUE_CAP, TRAY_BASE_SIZE, WAVE_MAX_TIER, waveCalloutText } from './core.js';
 import { BOARD_SIZE, COLORS } from './pieces.js';
 import { ATLAS_TILE, ATLAS_VARIANTS, ATLAS_PATH } from './spriteAtlasConfig.js';
+import { BLOCK_MAP_PATH } from './blockTextureConfig.js';
 import { playLineClear, playShardScatter, playGameOver, playComboVoice, playPerfectClearVoice, unlockAudio, setWaveTier, startBgm, setSfxVolume, getSfxVolume, setBgmVolume, getBgmVolume } from './audio.js';
 import { fetchTopScores, submitScore } from './leaderboard.js';
 
@@ -158,6 +159,9 @@ let bestScore = readBestScore();
 // -- drives the game-over overlay's "New Best!" vs "X short of best" text
 // (task 5), reset every newGame().
 let beatBestThisGame = false;
+// GDD 12.8: guards triggerDeathSequence against firing more than once per
+// game (see refreshChrome); reset per newGame() below.
+let deathSequenceStarted = false;
 
 function newGameState() {
   return createGame(undefined, {
@@ -215,6 +219,54 @@ let state = tryLoadGameState() ?? newGameState();
 saveGameState(state);
 let lastLogLen = 0;
 
+// ---- GDD 10/11: pause/resume (P or Escape) ---------------------------------
+// A virtual clock: every animation timestamp in this file (startedAt/
+// expiresAt fields, and every elapsed-time read) is taken from vnow()
+// instead of raw performance.now(). While paused, vnow() is pinned to the
+// instant pause began, so every in-flight animation's elapsed-time math
+// freezes exactly where it was; on resume, vnow() picks back up from that
+// same frozen value (offset by the accumulated paused duration relative to
+// real time), so nothing time-jumps. This is a single choke point rather
+// than needing to shift startedAt/expiresAt on every individual animation
+// data structure (boardFlashes, shardArcs, landingAnims, etc.) by hand.
+const pauseOverlay = document.getElementById('pauseOverlay');
+let isPaused = false;
+let pauseStartedAt = null; // real performance.now() at the moment pause began, else null
+let pauseAccumMs = 0; // total real time spent paused so far, subtracted out of vnow()
+
+function vnow() {
+  return (pauseStartedAt !== null ? pauseStartedAt : performance.now()) - pauseAccumMs;
+}
+
+function setPaused(next) {
+  if (next === isPaused) return;
+  // GDD section 10: pause is only a valid input while Playing -- a finished
+  // run has its own overlay/state already and isn't "Playing".
+  if (next && state.gameOver) return;
+  isPaused = next;
+  if (next) {
+    pauseStartedAt = performance.now();
+    // Mid-drag pause (P/Escape pressed while holding a piece): drop the held
+    // piece back to the tray rather than leaving it stuck mid-air frozen in
+    // an ambiguous state -- matches "input on pieces frozen", not "input
+    // silently continues once resumed from wherever the pointer drifted to".
+    drag = null;
+    if (pauseOverlay) pauseOverlay.classList.add('show');
+  } else {
+    pauseAccumMs += performance.now() - pauseStartedAt;
+    pauseStartedAt = null;
+    if (pauseOverlay) pauseOverlay.classList.remove('show');
+    draw();
+  }
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'p' && e.key !== 'P' && e.key !== 'Escape') return;
+  if (state.gameOver) return; // matches setPaused's own guard; avoids swallowing Escape elsewhere post-game
+  e.preventDefault();
+  setPaused(!isPaused);
+});
+
 // ---- Section 5b: non-blocking pulse callouts --------------------------------
 // Drawn directly on canvas (no new DOM/CSS chrome) so they stay inert to
 // pointer input by construction and anchor exactly to the layout-computed
@@ -225,7 +277,7 @@ let calloutTickerRunning = false;
 
 function ingestPendingCallouts(s) {
   if (!s.pendingCallouts.length) return;
-  const now = performance.now();
+  const now = vnow();
   for (const c of s.pendingCallouts) activeCallouts.push({ ...c, expiresAt: now + CALLOUT_DURATION_MS });
   s.pendingCallouts.length = 0;
   startCalloutTicker();
@@ -236,7 +288,7 @@ function startCalloutTicker() {
   calloutTickerRunning = true;
   const tick = () => {
     const before = activeCallouts.length;
-    activeCallouts = activeCallouts.filter((c) => c.expiresAt > performance.now());
+    activeCallouts = activeCallouts.filter((c) => c.expiresAt > vnow());
     if (before !== activeCallouts.length || activeCallouts.length > 0) draw();
     if (activeCallouts.length > 0) {
       requestAnimationFrame(tick);
@@ -263,7 +315,7 @@ function startEffectsTicker() {
   if (effectsTickerRunning) return;
   effectsTickerRunning = true;
   const tick = () => {
-    const now = performance.now();
+    const now = vnow();
     boardFlashes = boardFlashes.filter((f) => f.expiresAt > now);
     if (shake && now > shake.startedAt + shake.duration) shake = null;
     draw();
@@ -277,28 +329,175 @@ function startEffectsTicker() {
 }
 
 function triggerClearFlash(rows, cols, color) {
-  const now = performance.now();
+  const now = vnow();
   const expiresAt = now + FLASH_DURATION_MS;
   for (const r of rows) for (let c = 0; c < BOARD_SIZE; c++) boardFlashes.push({ r, c, color, expiresAt, startedAt: now, kind: 'clear' });
   for (const c of cols) for (let r = 0; r < BOARD_SIZE; r++) boardFlashes.push({ r, c, color, expiresAt, startedAt: now, kind: 'clear' });
   startEffectsTicker();
 }
 
+// ---- GDD 12.1/12.2: placement drop-in + squash-and-settle ------------------
+// Per-cell animation keyed to board (r,c): a 10px drop-in ease-out over 90ms,
+// immediately followed by a 1.0->0.94->1.0 squash-and-settle over 120ms
+// (total ~210ms). Purely a draw()-time transform on top of the already-
+// mutated board data -- core.js's placePiece already committed the cell by
+// the time this fires, so this never touches placement/scoring logic.
+const DROP_IN_MS = 90;
+const SQUASH_MS = 120;
+const DROP_IN_PX = 10;
+let landingAnims = new Map(); // key `${r},${c}` -> { startedAt }
+let landingTickerRunning = false;
+
+function triggerLandingAnim(cells, r0, c0) {
+  const now = vnow();
+  for (const [dr, dc] of cells) landingAnims.set(`${r0 + dr},${c0 + dc}`, { startedAt: now });
+  startLandingTicker();
+}
+
+function startLandingTicker() {
+  if (landingTickerRunning) return;
+  landingTickerRunning = true;
+  const tick = () => {
+    const now = vnow();
+    for (const [key, a] of landingAnims) {
+      if (now - a.startedAt > DROP_IN_MS + SQUASH_MS) landingAnims.delete(key);
+    }
+    draw();
+    if (landingAnims.size > 0) {
+      requestAnimationFrame(tick);
+    } else {
+      landingTickerRunning = false;
+    }
+  };
+  requestAnimationFrame(tick);
+}
+
+// Returns { offsetY, scaleX, scaleY } for a board cell, or null if it has no
+// active landing animation. offsetY is in the same px units as cellSize.
+function landingTransformFor(r, c) {
+  const a = landingAnims.get(`${r},${c}`);
+  if (!a) return null;
+  const elapsed = vnow() - a.startedAt;
+  if (elapsed < DROP_IN_MS) {
+    // ease-out (quadratic) from -DROP_IN_PX to 0
+    const t = elapsed / DROP_IN_MS;
+    const eased = 1 - (1 - t) * (1 - t);
+    return { offsetY: -DROP_IN_PX * (1 - eased), scaleX: 1, scaleY: 1 };
+  }
+  const st = Math.min(1, (elapsed - DROP_IN_MS) / SQUASH_MS);
+  // 1.0 -> 0.94 -> 1.0, ease-out down then bounce back up
+  const dip = Math.sin(st * Math.PI) * 0.06;
+  return { offsetY: 0, scaleX: 1 + dip * 0.5, scaleY: 1 - dip };
+}
+
+// ---- GDD 12.4: gold flash / zoom pulse for near-miss & big-clear rewards ---
+const GOLD = '#F4C430';
+const GOLD_FLASH_MS = 150;
+const MILESTONE_FLASH_MS = 120;
+const ZOOM_PULSE_MS = 220;
+let goldFlash = null; // { startedAt, duration }
+let zoomPulse = null; // { startedAt }
+
+function triggerGoldFlash(duration = GOLD_FLASH_MS) {
+  goldFlash = { startedAt: vnow(), duration };
+  startEffectsTicker();
+}
+
+function triggerZoomPulse() {
+  zoomPulse = { startedAt: vnow() };
+  startEffectsTicker();
+}
+
+function currentZoomScale() {
+  if (!zoomPulse) return 1;
+  const t = (vnow() - zoomPulse.startedAt) / ZOOM_PULSE_MS;
+  if (t >= 1) { zoomPulse = null; return 1; }
+  // 1.0 -> 1.03 -> 1.0
+  return 1 + Math.sin(t * Math.PI) * 0.03;
+}
+
+// ---- GDD 12.2/7: shard arc from cleared line to the shard-queue slot -------
+// Cosmetic-only overlay: core.js has already inserted the real shard(s) into
+// state.shardQueue by the time this fires, so this never affects queue/tray
+// logic -- it just gives the already-committed shard a 220ms ease-in-out
+// flight path + 100ms landing squash instead of popping in instantly.
+const SHARD_ARC_MS = 220;
+const SHARD_LAND_SQUASH_MS = 100;
+let shardArcs = []; // { fromX, fromY, toX, toY, color, shapeId, startedAt, slowFactor }
+let shardArcTickerRunning = false;
+
+function triggerShardArcs(fromX, fromY, targets, color, bigClear) {
+  const now = vnow();
+  // GDD 12.4 "time dilation" on a big-clear shatter: rather than a global
+  // clock rewrite (high regression risk against the existing flash/shake/
+  // combo tickers), stretch just this new effect's own duration so a big
+  // clear's shard flight visibly reads as slower -- same visual intent
+  // (0.5x for the first part, ramping back) without touching shared timing.
+  const slowFactor = bigClear ? 1.8 : 1;
+  for (const target of targets) {
+    shardArcs.push({ fromX, fromY, toX: target.x, toY: target.y, color, startedAt: now, slowFactor });
+  }
+  startShardArcTicker();
+}
+
+function startShardArcTicker() {
+  if (shardArcTickerRunning) return;
+  shardArcTickerRunning = true;
+  const tick = () => {
+    const now = vnow();
+    shardArcs = shardArcs.filter((a) => now - a.startedAt < (SHARD_ARC_MS + SHARD_LAND_SQUASH_MS) * a.slowFactor);
+    draw();
+    if (shardArcs.length > 0) {
+      requestAnimationFrame(tick);
+    } else {
+      shardArcTickerRunning = false;
+    }
+  };
+  requestAnimationFrame(tick);
+}
+
+function drawShardArcs() {
+  const now = vnow();
+  for (const a of shardArcs) {
+    const elapsed = now - a.startedAt;
+    const arcDur = SHARD_ARC_MS * a.slowFactor;
+    if (elapsed < arcDur) {
+      const t = elapsed / arcDur;
+      // ease-in-out
+      const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      const x = a.fromX + (a.toX - a.fromX) * eased;
+      const y = a.fromY + (a.toY - a.fromY) * eased;
+      // Parabolic arc height, peaking mid-flight.
+      const arcHeight = 26;
+      const y2 = y - Math.sin(eased * Math.PI) * arcHeight;
+      drawShardSprite(x, y2, 16, a.color, 0);
+    } else {
+      // Landing squash: a brief radial pulse at the destination.
+      const st = Math.min(1, (elapsed - arcDur) / (SHARD_LAND_SQUASH_MS * a.slowFactor));
+      const scale = 1 + Math.sin(st * Math.PI) * 0.35;
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - st);
+      drawShardSprite(a.toX, a.toY, 16 * scale, a.color, 0);
+      ctx.restore();
+    }
+  }
+}
+
 function triggerLandFlash(cells, r0, c0, color) {
-  const now = performance.now();
+  const now = vnow();
   const expiresAt = now + LAND_FLASH_DURATION_MS;
   for (const [dr, dc] of cells) boardFlashes.push({ r: r0 + dr, c: c0 + dc, color, expiresAt, startedAt: now, kind: 'land' });
   startEffectsTicker();
 }
 
 function triggerShake(magnitude) {
-  shake = { startedAt: performance.now(), duration: SHAKE_DURATION_MS, magnitude };
+  shake = { startedAt: vnow(), duration: SHAKE_DURATION_MS, magnitude };
   startEffectsTicker();
 }
 
 function currentShakeOffset() {
   if (!shake) return { x: 0, y: 0 };
-  const now = performance.now();
+  const now = vnow();
   const t = (now - shake.startedAt) / shake.duration;
   if (t >= 1) return { x: 0, y: 0 };
   const falloff = 1 - t; // linear decay to 0
@@ -324,7 +523,7 @@ let confetti = []; // { x, y, vx, vy, color, size, rotation, vr, expiresAt }
 let burstTickerRunning = false;
 
 function triggerCenterBurst(text, kind, level) {
-  const now = performance.now();
+  const now = vnow();
   centerBursts.push({ text, kind, level, startedAt: now, expiresAt: now + CENTER_BURST_DURATION_MS });
 
   const cx = layout.gridX + (BOARD_SIZE * cellSize) / 2;
@@ -352,7 +551,7 @@ function startBurstTicker() {
   if (burstTickerRunning) return;
   burstTickerRunning = true;
   const tick = () => {
-    const now = performance.now();
+    const now = vnow();
     centerBursts = centerBursts.filter((b) => b.expiresAt > now);
     confetti = confetti.filter((p) => p.expiresAt > now);
     draw();
@@ -366,7 +565,7 @@ function startBurstTicker() {
 }
 
 function drawConfetti() {
-  const now = performance.now();
+  const now = vnow();
   const gravity = 260;
   for (const p of confetti) {
     const t = (now - p.startedAt) / 1000;
@@ -384,7 +583,7 @@ function drawConfetti() {
 }
 
 function drawCenterBursts() {
-  const now = performance.now();
+  const now = vnow();
   const cx = layout.gridX + (BOARD_SIZE * cellSize) / 2;
   const cy = layout.gridY + (BOARD_SIZE * cellSize) / 2;
   for (const b of centerBursts) {
@@ -426,6 +625,124 @@ function drawCenterBursts() {
     ctx.fillText(b.text, 0, 0);
     ctx.restore();
   }
+}
+
+// ---- GDD 12.6: idle life (shimmer + tray bob) ------------------------------
+// A low-cost continuous RAF loop, only running while there's something to
+// animate (Playing, not game-over -- there is no pause state in this build
+// yet, see qa-verification note in progress.md) so idle players still see
+// placed cubes shimmer and tray pieces bob without needing any interaction
+// to keep re-triggering draw(). Throttled to ~20fps (idle ambience doesn't
+// need 60fps) to keep this cheap to leave running indefinitely.
+const IDLE_FRAME_INTERVAL_MS = 1000 / 20;
+const SHIMMER_PERIOD_MS = 3000;
+const TRAY_BOB_PERIOD_MS = 1800;
+const TRAY_BOB_PX = 2;
+let idleTickerRunning = false;
+let lastIdleFrameAt = 0;
+
+function shimmerAlphaFor(r, c) {
+  // Per-cell phase offset (not a uniform pulse across the whole board) so it
+  // reads as organic ambient life rather than a single synchronized blink.
+  const phase = (r * 7 + c * 13) % 1000;
+  const t = ((vnow() + phase) % SHIMMER_PERIOD_MS) / SHIMMER_PERIOD_MS;
+  return Math.sin(t * Math.PI * 2) * 0.02; // +-2% brightness
+}
+
+function trayBobOffsetFor(i) {
+  const phase = i * 260; // stagger per tray slot
+  const t = ((vnow() + phase) % TRAY_BOB_PERIOD_MS) / TRAY_BOB_PERIOD_MS;
+  return Math.sin(t * Math.PI * 2) * TRAY_BOB_PX;
+}
+
+function startIdleTicker() {
+  if (idleTickerRunning) return;
+  idleTickerRunning = true;
+  const tick = () => {
+    if (state.gameOver) { idleTickerRunning = false; return; }
+    const now = vnow();
+    if (now - lastIdleFrameAt >= IDLE_FRAME_INTERVAL_MS) {
+      lastIdleFrameAt = now;
+      draw();
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+// ---- GDD 12.7: milestone celebrations every 500 points ---------------------
+const MILESTONE_INTERVAL = 500;
+let lastMilestoneReached = 0; // tracks Math.floor(score / MILESTONE_INTERVAL)
+
+function checkMilestone(prevScore, newScore) {
+  const prevTier = Math.floor(prevScore / MILESTONE_INTERVAL);
+  const newTier = Math.floor(newScore / MILESTONE_INTERVAL);
+  if (newTier > prevTier && newTier > lastMilestoneReached) {
+    lastMilestoneReached = newTier;
+    scoreVal.classList.remove('milestone-pop');
+    // Force reflow so re-adding the class restarts the CSS animation even if
+    // two milestones fire in quick succession.
+    void scoreVal.offsetWidth;
+    scoreVal.classList.add('milestone-pop');
+    triggerGoldFlash(MILESTONE_FLASH_MS);
+  }
+}
+
+// ---- GDD 12.8: death sequence ----------------------------------------------
+// Desaturate placed cubes (300ms) -> single 6px board shake -> 120ms
+// freeze-frame -> dim overlay fades in with the Game Over panel, ~600ms
+// total before the panel is interactive. Runs entirely on the canvas side;
+// the actual DOM overlay.classList.add('show') is deferred until this
+// sequence completes (see refreshChrome), so the panel can't be clicked
+// mid-sequence.
+const DEATH_DESATURATE_MS = 300;
+const DEATH_FREEZE_MS = 120;
+const DEATH_SHAKE_MS = 300; // GDD 12.4: game-over shake, 6px amplitude, 300ms decay
+let deathSeq = null; // { startedAt }
+let deathTickerRunning = false;
+
+function triggerDeathSequence(onComplete) {
+  deathSeq = { startedAt: vnow() };
+  startDeathTicker(onComplete);
+}
+
+function deathDesaturateAmount() {
+  if (!deathSeq) return 0;
+  const elapsed = vnow() - deathSeq.startedAt;
+  return Math.max(0, Math.min(1, elapsed / DEATH_DESATURATE_MS));
+}
+
+function startDeathTicker(onComplete) {
+  if (deathTickerRunning) return;
+  deathTickerRunning = true;
+  const tick = () => {
+    const elapsed = vnow() - deathSeq.startedAt;
+    if (elapsed < DEATH_DESATURATE_MS) {
+      draw();
+      requestAnimationFrame(tick);
+      return;
+    }
+    if (elapsed < DEATH_DESATURATE_MS + 1) {
+      // Fire the single shake exactly once, right as desaturation completes.
+      triggerShake(6);
+    }
+    if (elapsed < DEATH_DESATURATE_MS + DEATH_SHAKE_MS) {
+      draw();
+      requestAnimationFrame(tick);
+      return;
+    }
+    if (elapsed < DEATH_DESATURATE_MS + DEATH_SHAKE_MS + DEATH_FREEZE_MS) {
+      // Freeze-frame: intentionally skip draw() for this window so the last
+      // rendered frame holds still before the overlay fades in on top of it.
+      requestAnimationFrame(tick);
+      return;
+    }
+    deathTickerRunning = false;
+    deathSeq = null;
+    draw();
+    onComplete();
+  };
+  requestAnimationFrame(tick);
 }
 
 function drawCallout(text, anchorX, anchorY, align = 'left') {
@@ -610,6 +927,81 @@ shardAtlas.onerror = () => {
 };
 shardAtlas.src = ATLAS_PATH;
 
+// ---- render-swap: Cube World block textures (GDD sections 4, 8) ----------
+// Maps each of the 7 colorblind-audited palette colors (pieces.js COLORS) to
+// one of the 8 baked block-texture families in assets/blocks/block-map.json,
+// per the GDD section 8 family mapping. GDD explicitly names 6 mappings
+// (teal/cyan->diamond, yellow/gold->gold, red->brick, green->grass,
+// orange->planks, purple->amethyst); the palette's 7th color (#4529ff, a
+// blue distinct from the teal/cyan entry already spoken for) has no named
+// GDD mapping, so it's assigned to the neutral stone_gray family. dirt_brown
+// is intentionally unused by this mapping (no palette color reads as
+// "brown") -- still a valid baked family, just not needed for the 7-color
+// piece palette; nothing in the GDD requires all 8 families to be in use.
+const FAMILY_BY_COLOR = {
+  '#ae133a': 'brick_red',
+  '#4529ff': 'stone_gray',
+  '#45eda7': 'grass_green',
+  '#f1c40f': 'gold_yellow',
+  '#ac5ae2': 'amethyst_purple',
+  '#e07c52': 'planks_tan',
+  '#1c899c': 'diamond_cyan',
+};
+
+const blockAtlasImg = new Image();
+let blockMapData = null;
+let blocksReady = false;
+let blocksFailed = false;
+
+async function loadBlockTextures() {
+  try {
+    const res = await fetch(BLOCK_MAP_PATH);
+    if (!res.ok) throw new Error(`block-map.json fetch failed: HTTP ${res.status}`);
+    blockMapData = await res.json();
+    await new Promise((resolve, reject) => {
+      blockAtlasImg.onload = () => resolve();
+      blockAtlasImg.onerror = () => reject(new Error('block texture atlas image failed to load'));
+      blockAtlasImg.src = blockMapData.atlasPath;
+    });
+    blocksReady = true;
+  } catch (e) {
+    // Per GDD section 8/13: a missing/failed block texture must never block
+    // play -- drawBlockCell below falls back to the original flat piece
+    // color (still beveled) whenever blocksReady is false, so the game stays
+    // fully playable with zero texture assets present.
+    console.error('Cube Blast: block textures failed to load, falling back to flat colors:', e);
+    blocksFailed = true;
+  }
+  draw();
+}
+loadBlockTextures();
+
+// Draws one occupied cell (board cell or piece/tray cell) as a textured
+// voxel block: the block-family texture tile scaled to the cell rect, then a
+// top-edge highlight + bottom/right-edge shadow overlay (GDD section 8: white
+// 12% alpha ~8px top band, black 18% alpha ~6px bottom/right band, scaled
+// from the 56px reference tile to whatever `size` this cell actually is).
+// Falls back to a flat color fill (still overlaid with the same bevel) if
+// the texture atlas never became ready or has no entry for this color.
+function drawBlockCell(x, y, size, color) {
+  const family = FAMILY_BY_COLOR[color];
+  const familyData = blocksReady && blockMapData ? blockMapData.families[family] : null;
+  if (familyData) {
+    const a = familyData.atlas;
+    ctx.drawImage(blockAtlasImg, a.x, a.y, a.w, a.h, x, y, size, size);
+  } else {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, size, size);
+  }
+  const topH = Math.max(1, Math.round(size * (8 / 56)));
+  const edgeW = Math.max(1, Math.round(size * (6 / 56)));
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  ctx.fillRect(x, y, size, topH);
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.fillRect(x, y + size - edgeW, size, edgeW);
+  ctx.fillRect(x + size - edgeW, y, edgeW, size);
+}
+
 function drawShardSprite(cx, cy, size, color, seed) {
   const colorIdx = COLOR_INDEX.get(color) ?? 0;
   const variantIdx = ((seed % ATLAS_VARIANTS) + ATLAS_VARIANTS) % ATLAS_VARIANTS;
@@ -668,20 +1060,19 @@ function drawPieceGrid(cells, color, ox, oy, subcell, isShard, shapeId) {
       const cellSeed = (shapeSeed + r * 131 + c * 977) | 0;
       drawShardSprite(x + subcell / 2, y + subcell / 2, chipSize, color, cellSeed);
     } else {
-      ctx.fillStyle = color;
-      roundRect(x + 1, y + 1, subcell - 2, subcell - 2, 4);
-      ctx.fill();
-      // Subtle flat top-edge highlight -- still a flat color (lighter shade
-      // of the fill), not a gradient; a small refinement over the previous
-      // plain single-tone fill.
-      ctx.strokeStyle = shadeColor(color, 0.28);
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(x + 5, y + 1.5);
-      ctx.lineTo(x + subcell - 5, y + 1.5);
-      ctx.stroke();
+      // render-swap: textured voxel block per GDD section 8, clipped to the
+      // existing rounded-rect cell silhouette (tray/held pieces keep their
+      // rounded look; drawBlockCell itself draws the flat-fallback + bevel
+      // if textures aren't ready/failed, so this stays fully playable with
+      // no texture assets present).
+      const cx = x + 1, cy = y + 1, cw = subcell - 2, ch = subcell - 2;
+      ctx.save();
+      roundRect(cx, cy, cw, ch, 4);
+      ctx.clip();
+      drawBlockCell(cx, cy, Math.max(cw, ch), color);
+      ctx.restore();
       ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-      roundRect(x + 1, y + 1, subcell - 2, subcell - 2, 4);
+      roundRect(cx, cy, cw, ch, 4);
       ctx.stroke();
     }
   }
@@ -708,6 +1099,29 @@ function draw() {
   const shakeOffset = currentShakeOffset();
   ctx.translate(shakeOffset.x, shakeOffset.y);
 
+  // GDD 12.4: zoom pulse on a 3+ line simultaneous clear -- board scales
+  // 1.0->1.03->1.0 around the board's own center, restored below with the
+  // rest of the shake/zoom transform via ctx.restore() at the end of draw().
+  const zoomScale = currentZoomScale();
+  if (zoomScale !== 1) {
+    const bcx = layout.gridX + (BOARD_SIZE * cellSize) / 2;
+    const bcy = layout.gridY + (BOARD_SIZE * cellSize) / 2;
+    ctx.translate(bcx, bcy);
+    ctx.scale(zoomScale, zoomScale);
+    ctx.translate(-bcx, -bcy);
+  }
+
+  // --- block texture loading state (GDD sections 2/13) -----------------
+  // Non-blocking: cells already render via drawBlockCell's flat-color
+  // fallback while this is showing, so the game is playable immediately --
+  // this is purely a transient status label, not a gate on input/draw.
+  if (!blocksReady && !blocksFailed) {
+    ctx.fillStyle = t.muted;
+    ctx.font = '11px -apple-system, sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Loading blocks…', GAP, 4);
+  }
+
   // --- shard queue row ---
   ctx.fillStyle = t.muted;
   ctx.font = '11px -apple-system, sans-serif';
@@ -732,15 +1146,47 @@ function draw() {
   }
 
   // --- grid ---
+  const desaturateAmt = deathDesaturateAmount(); // GDD 12.8: 0..1 over 300ms
   for (let r = 0; r < BOARD_SIZE; r++) {
     for (let c = 0; c < BOARD_SIZE; c++) {
       const x = layout.gridX + c * cellSize;
       const y = layout.gridY + r * cellSize;
       const cell = state.board[r][c];
-      ctx.fillStyle = cell ? cell.color : t.emptyCell;
+      if (cell) {
+        // GDD 12.1/12.2: drop-in + squash-and-settle on a just-placed cell.
+        const landing = landingTransformFor(r, c);
+        if (landing) {
+          const cx = x + cellSize / 2, cy = y + cellSize / 2;
+          ctx.save();
+          ctx.translate(cx, cy + landing.offsetY);
+          ctx.scale(landing.scaleX, landing.scaleY);
+          ctx.translate(-cx, -cy);
+          drawBlockCell(x, y, cellSize, cell.color);
+          ctx.restore();
+        } else {
+          drawBlockCell(x, y, cellSize, cell.color);
+        }
+        // GDD 12.6: idle shimmer on placed cubes, +-2% brightness ~3s period.
+        const shimmer = shimmerAlphaFor(r, c);
+        if (shimmer !== 0) {
+          ctx.fillStyle = shimmer > 0 ? `rgba(255,255,255,${shimmer})` : `rgba(0,0,0,${-shimmer})`;
+          ctx.fillRect(x, y, cellSize, cellSize);
+        }
+        // GDD 12.8: death-sequence desaturation, gray wash ramping to full
+        // strength over 300ms (drawn as a flat gray overlay rather than a
+        // canvas filter -- filter:grayscale on the whole canvas would also
+        // desaturate the drop-preview/UI text drawn later in this same
+        // draw() call, which the GDD only calls out for "placed cubes").
+        if (desaturateAmt > 0) {
+          ctx.fillStyle = `rgba(128,128,128,${desaturateAmt * 0.6})`;
+          ctx.fillRect(x, y, cellSize, cellSize);
+        }
+      } else {
+        ctx.fillStyle = t.emptyCell;
+        ctx.fillRect(x, y, cellSize, cellSize);
+      }
       ctx.strokeStyle = t.gridLine;
       ctx.lineWidth = 2;
-      ctx.fillRect(x, y, cellSize, cellSize);
       ctx.strokeRect(x, y, cellSize, cellSize);
     }
   }
@@ -752,7 +1198,7 @@ function draw() {
   if (boardFlashes.length > 0) {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    const now = performance.now();
+    const now = vnow();
     for (const f of boardFlashes) {
       const life = (f.expiresAt - now) / (f.expiresAt - f.startedAt);
       if (life <= 0) continue;
@@ -765,6 +1211,26 @@ function draw() {
     ctx.globalAlpha = 1;
     ctx.restore();
   }
+
+  // GDD 12.3/12.4: board-wide gold flash for near-miss/big-clear rewards and
+  // milestone celebrations -- #F4C430 at up to 25% alpha, distinct from the
+  // per-color clear flash above (that one tints with the clearing piece's
+  // own color; this one is always literal gold, the "reward" signal).
+  if (goldFlash) {
+    const life = 1 - (vnow() - goldFlash.startedAt) / goldFlash.duration;
+    if (life <= 0) {
+      goldFlash = null;
+    } else {
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, Math.min(1, life)) * 0.25;
+      ctx.fillStyle = GOLD;
+      ctx.fillRect(layout.gridX, layout.gridY, BOARD_SIZE * cellSize, BOARD_SIZE * cellSize);
+      ctx.restore();
+    }
+  }
+
+  // GDD 12.2/7: shards arcing from the cleared line to their shard-queue slot.
+  if (shardArcs.length > 0) drawShardArcs();
 
   // --- drop preview ---
   if (drag) {
@@ -843,7 +1309,10 @@ function draw() {
       const subH = Math.floor((TRAY_SLOT_H - 16) / Math.max(ext.rows, 1));
       const s = Math.min(sub, subH, 18);
       const ox = x + (TRAY_SLOT_W - ext.cols * s) / 2;
-      const oy = y + (TRAY_SLOT_H - ext.rows * s) / 2;
+      // GDD 12.6: gentle 2px vertical bob, staggered per tray slot, while a
+      // piece awaits placement -- applied to the piece art only, not the
+      // slot outline, so the fixed slot border stays a stable drop target.
+      const oy = y + (TRAY_SLOT_H - ext.rows * s) / 2 + trayBobOffsetFor(i);
       // No text label here anymore -- the shard's chip silhouette (see
       // drawPieceGrid) is the actual legibility signal now, not a fallback
       // "shard" caption. Keeping the label would have masked whether the
@@ -930,6 +1399,7 @@ canvas.addEventListener('pointerdown', (e) => {
   unlockAudio(); // must run from a real user-gesture handler; safe to call every time
   startBgm(); // no-ops if already running
   if (state.gameOver) return;
+  if (isPaused) return; // GDD 11: "all animations, shard motion, and input on pieces frozen" while paused
   const p = pointFromEvent(e);
   const idx = trayIndexAt(p.x, p.y);
   if (idx >= 0 && state.tray[idx]) {
@@ -947,6 +1417,79 @@ canvas.addEventListener('pointermove', (e) => {
   draw();
 });
 
+// Shared by real pointer input (endDrag below) AND the __fractureDebug QA
+// hook, so an automated test driving placement through the debug hook
+// exercises the exact same juice/effects path a real drag-drop does instead
+// of silently bypassing it (a real gap this pass found: the debug hook used
+// to call core.js's placePiece directly and skip every trigger* call below).
+function performPlacement(trayIndex, targetR, targetC) {
+  const piece = state.tray[trayIndex];
+  const scoreBefore = state.score;
+  const queueLenBefore = state.shardQueue.length;
+  const res = placePiece(state, trayIndex, targetR, targetC);
+  if (res.ok) {
+      // GDD 12.1/12.2: drop-in + squash-and-settle for the just-landed cells.
+      triggerLandingAnim(piece.shape, targetR, targetC);
+      // Landing flash for the piece that just landed on the board -- do this
+      // BEFORE refreshChrome/clear-line flash so a placement that both lands
+      // and immediately clears shows both effects, land first.
+      triggerLandFlash(piece.shape, targetR, targetC, piece.color);
+      if (res.lineCount > 0) {
+        // GDD 12.3: "big-clear" reward = clears >=3 lines at once OR leaves
+        // the board nearly empty (<=2 occupied cells after the clear).
+        let occupiedAfter = 0;
+        for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) if (state.board[r][c]) occupiedAfter++;
+        const bigClear = res.lineCount >= 3 || occupiedAfter <= 2;
+
+        triggerClearFlash(res.rows, res.cols, piece.color);
+        playLineClear(res.lineCount);
+
+        // GDD 12.2/7: arc the newly-generated shards from the cleared line
+        // out to their shard-queue slot. Only covers shards that actually
+        // landed in the visible queue (queueLenBefore..now) -- an overflow
+        // shard force-inserted straight into the tray has no queue slot to
+        // arc into, so it's skipped here (core.js's own tray-insert already
+        // handles that path; this is cosmetic-only and never re-derives
+        // queue/tray placement).
+        const newlyQueued = Math.max(0, state.shardQueue.length - queueLenBefore);
+        if (newlyQueued > 0) {
+          const bx = layout.gridX, by = layout.gridY;
+          const points = [];
+          for (const r of res.rows) points.push({ x: bx + (BOARD_SIZE * cellSize) / 2, y: by + r * cellSize + cellSize / 2 });
+          for (const c of res.cols) points.push({ x: bx + c * cellSize + cellSize / 2, y: by + (BOARD_SIZE * cellSize) / 2 });
+          const srcX = points.reduce((s, p) => s + p.x, 0) / points.length;
+          const srcY = points.reduce((s, p) => s + p.y, 0) / points.length;
+          const targets = [];
+          for (let i = 0; i < newlyQueued; i++) {
+            const qi = queueLenBefore + i;
+            targets.push({ x: GAP + qi * (QUEUE_SLOT + 8) + QUEUE_SLOT / 2, y: layout.queueY + QUEUE_SLOT / 2 });
+          }
+          triggerShardArcs(srcX, srcY, targets, piece.color, bigClear);
+        }
+        if (res.shardCount > 0) playShardScatter(res.shardCount);
+
+        if (bigClear) {
+          // GDD 12.3/12.4: gold flash + zoom pulse (3+ lines) as the reward
+          // signal for a big/near-empty clear; the game-over shake stays
+          // reserved for death (GDD 12.4's table pairs shake with game-over
+          // specifically, not clears -- see triggerDeathSequence).
+          triggerGoldFlash();
+          if (res.lineCount >= 3) triggerZoomPulse();
+        }
+        if (res.wholeFieldClear) {
+          triggerCenterBurst('PERFECT CLEAR!', 'perfect', res.comboStreak);
+          playPerfectClearVoice();
+        } else if (res.comboStreak >= 2) {
+          triggerCenterBurst(comboAffirmationText(res.comboStreak), 'combo', res.comboStreak);
+          playComboVoice(res.comboStreak);
+        }
+      }
+      checkMilestone(scoreBefore, state.score); // GDD 12.7
+      refreshChrome();
+  }
+  return res;
+}
+
 function endDrag(e) {
   if (!drag) return;
   // Re-sample the pointer position from the pointerup event itself rather
@@ -962,31 +1505,8 @@ function endDrag(e) {
   }
   const target = dragTargetCell();
   const trayIndex = drag.trayIndex;
-  const piece = drag.piece;
   drag = null;
-  if (target) {
-    const res = placePiece(state, trayIndex, target.r, target.c);
-    if (res.ok) {
-      // Landing flash for the piece that just landed on the board -- do this
-      // BEFORE refreshChrome/clear-line flash so a placement that both lands
-      // and immediately clears shows both effects, land first.
-      triggerLandFlash(piece.shape, target.r, target.c, piece.color);
-      if (res.lineCount > 0) {
-        triggerClearFlash(res.rows, res.cols, piece.color);
-        playLineClear(res.lineCount);
-        if (res.shardCount > 0) playShardScatter(res.shardCount);
-        if (res.lineCount >= 3) triggerShake(6);
-        if (res.wholeFieldClear) {
-          triggerCenterBurst('PERFECT CLEAR!', 'perfect', res.comboStreak);
-          playPerfectClearVoice();
-        } else if (res.comboStreak >= 2) {
-          triggerCenterBurst(comboAffirmationText(res.comboStreak), 'combo', res.comboStreak);
-          playComboVoice(res.comboStreak);
-        }
-      }
-      refreshChrome();
-    }
-  }
+  if (target) performPlacement(trayIndex, target.r, target.c);
   draw();
 }
 
@@ -1042,8 +1562,18 @@ function refreshChrome() {
       bestDeltaEl.textContent = short > 0 ? `${short} short of best (${bestScore})` : `Best: ${bestScore}`;
       bestDeltaEl.classList.remove('new-best');
     }
-    overlay.classList.add('show');
-    playGameOver();
+    // GDD 12.8: desaturate -> shake -> freeze-frame (~600ms total) BEFORE the
+    // Game Over panel becomes interactive/visible -- guarded so a second
+    // refreshChrome() call while already game-over (e.g. quitGame() ->
+    // refreshChrome(), or a resumed already-over save) can't restart or
+    // double-fire the sequence.
+    if (!deathSequenceStarted) {
+      deathSequenceStarted = true;
+      playGameOver();
+      triggerDeathSequence(() => {
+        overlay.classList.add('show');
+      });
+    }
   }
   ingestPendingCallouts(state);
   persistOnboardingFlags(state);
@@ -1068,11 +1598,20 @@ function newGame() {
   activeCallouts = [];
   boardFlashes = [];
   shake = null;
+  landingAnims = new Map();
+  shardArcs = [];
+  goldFlash = null;
+  zoomPulse = null;
+  deathSeq = null;
+  deathTickerRunning = false;
+  deathSequenceStarted = false;
+  lastMilestoneReached = 0;
   beatBestThisGame = false;
   lastLogLen = 0;
   logEl.replaceChildren();
   overlay.classList.remove('show');
   bestDeltaEl.classList.remove('new-best');
+  scoreVal.classList.remove('milestone-pop');
   scoreVal.textContent = '0';
   bestVal.textContent = bestScore;
   waveLine.classList.remove('show');
@@ -1080,6 +1619,7 @@ function newGame() {
   submitScoreBtn.disabled = false;
   saveGameState(state);
   computeLayout();
+  startIdleTicker();
   draw();
 }
 
@@ -1143,8 +1683,17 @@ submitScoreBtn.addEventListener('click', async () => {
 // placePiece/refreshChrome/draw code path real play uses.
 window.__fractureDebug = {
   getState: () => state,
-  placePiece: (idx, r, c) => { const res = placePiece(state, idx, r, c); refreshChrome(); draw(); return res; },
+  // Routes through the SAME performPlacement() real drag-drop uses (not a
+  // bare core.js placePiece() call) so an automated test driving placement
+  // via this hook exercises the real juice/effects path (squash-settle,
+  // clear flash, shard arcs, milestone pop, etc.), not just the underlying
+  // game-state mutation.
+  placePiece: (idx, r, c) => { const res = performPlacement(idx, r, c); draw(); return res; },
   redraw: () => draw(),
+  // GDD 10/11 pause/resume test hook -- lets an automated test toggle pause
+  // deterministically instead of dispatching synthetic keydown events.
+  setPaused: (v) => setPaused(v),
+  isPaused: () => isPaused,
   triggerCenterBurst: (text, kind, level) => triggerCenterBurst(text, kind, level),
   // exact canvas-space geometry, so an external test driver doesn't have to
   // guess proportional coordinates for real pointer-drag simulation.
@@ -1163,5 +1712,7 @@ window.__fractureDebug = {
 // already 0, so this is a no-op in that case).
 scoreVal.textContent = state.score;
 bestVal.textContent = bestScore;
+lastMilestoneReached = Math.floor(state.score / MILESTONE_INTERVAL); // resumed run: don't re-celebrate milestones already passed
 computeLayout();
 draw();
+if (!state.gameOver) startIdleTicker(); // GDD 12.6: idle shimmer + tray bob
