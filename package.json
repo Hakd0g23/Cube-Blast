@@ -4,8 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node tests/core.test.mjs",
-    "bake-sprites": "node tools/sprite-bake/bake.mjs"
+    "test": "node tests/core.test.mjs"
   },
   "devDependencies": {
     "@capacitor/android": "^8.4.2",
