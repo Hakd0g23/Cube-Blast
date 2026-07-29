@@ -167,7 +167,7 @@ function renderTrayQueueOverlay(state) {
 let threeDrag = null; // { trayIndex, piece, slotEl, anchor, valid }
 let floatingPieceEl = null;
 
-function updateFloatingPiece(clientX, clientY, piece) {
+function updateFloatingPiece(clientX, clientY, piece, cellPx) {
   if (!floatingPieceEl) {
     floatingPieceEl = document.createElement('div');
     floatingPieceEl.id = 'three-drag-floating-piece';
@@ -177,12 +177,14 @@ function updateFloatingPiece(clientX, clientY, piece) {
   floatingPieceEl.style.gridTemplateColumns = `repeat(${ext.cols}, 1fr)`;
   floatingPieceEl.style.gridTemplateRows = `repeat(${ext.rows}, 1fr)`;
   floatingPieceEl.innerHTML = '';
-  // Same square-cell sizing as buildMiniPiece: the floating element's outer
-  // box is a fixed 72x72 (CSS), but non-square shapes should only fill part
-  // of it, not stretch to fill both axes independently.
-  const { widthPct, heightPct } = squareCellFraction(ext, 72, 72, 0, 24);
-  const boxW = (widthPct / 100) * 72;
-  const boxH = (heightPct / 100) * 72;
+  // 2026-07-29: previously sized off a fixed 72x72 box (24px/cell cap), which
+  // stopped matching the real board once the stage started scaling up to
+  // 720px responsively -- the piece looked smaller in-hand than the footprint
+  // it actually occupies on drop. cellPx comes from
+  // handle.getCellSizePx() (threeScene.js), the board's real live on-screen
+  // cell size, so the preview always matches the actual placement size.
+  const boxW = ext.cols * cellPx;
+  const boxH = ext.rows * cellPx;
   floatingPieceEl.style.width = `${boxW}px`;
   floatingPieceEl.style.height = `${boxH}px`;
   for (const [r, c] of piece.shape) {
@@ -224,6 +226,8 @@ if (THREE_PREVIEW) {
 
     const handle = createThreeScene(wrap);
 
+    const mainEl = document.getElementById('main');
+
     function currentSize() {
       // Mirrors the same viewport-scaling formula src/main.js's
       // computeLayout() uses (2026-07-29: loosened from a flat
@@ -239,7 +243,18 @@ if (THREE_PREVIEW) {
       // 280 -- both exist for the same reason (don't let a short/wide
       // viewport size the canvas taller than the visible window), just
       // scaled to each renderer's own actual vertical overhead.
-      const size = Math.min(window.innerWidth - 24, window.innerHeight - 90, 720);
+      //
+      // 2026-07-29 sidebar-overlap fix: width used to come straight off
+      // window.innerWidth, which ignores #app's flex layout (#main flex-basis
+      // 480 + #sidebar's fixed 220px + the 16px gap between them). Since
+      // #three-stage-wrap is sized in absolute px, an oversized wrap simply
+      // overflows #main's flex box instead of shrinking to fit it -- which is
+      // exactly what covered the leaderboard. Measuring #main's own
+      // clientWidth (its real flex-resolved box, already net of the sidebar)
+      // keeps the stage inside its column instead of guessing from the full
+      // window.
+      const availW = mainEl ? mainEl.clientWidth : window.innerWidth - 24;
+      const size = Math.min(availW, window.innerHeight - 90, 720);
       return { width: size, height: size };
     }
 
@@ -311,7 +326,7 @@ if (THREE_PREVIEW) {
       if (idx < 0 || !piece) return;
       threeDrag = { trayIndex: idx, piece, slotEl, anchor: null, valid: false };
       slotEl.classList.add('three-drag-source');
-      updateFloatingPiece(e.clientX, e.clientY, piece);
+      updateFloatingPiece(e.clientX, e.clientY, piece, handle.getCellSizePx());
       updateDragPreview(e.clientX, e.clientY);
       e.preventDefault();
     }
@@ -354,7 +369,7 @@ if (THREE_PREVIEW) {
     // identically for `pointerType: 'mouse'` and `'touch'`.
     window.addEventListener('pointermove', (e) => {
       if (!threeDrag) return;
-      updateFloatingPiece(e.clientX, e.clientY, threeDrag.piece);
+      updateFloatingPiece(e.clientX, e.clientY, threeDrag.piece, handle.getCellSizePx());
       updateDragPreview(e.clientX, e.clientY);
     });
     window.addEventListener('pointerup', (e) => {
