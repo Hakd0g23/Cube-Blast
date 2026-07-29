@@ -208,24 +208,33 @@ function updateFloatingPiece(clientX, clientY, piece, cellPx) {
   // applied unconditionally here since this floating element is always
   // separate from the pointer itself (mouse or touch alike).
   //
-  // drag-preview-covers-guide fix (2026-07-29): the lift used to be a flat
-  // 46px regardless of the piece's own on-screen footprint (boxH), which
-  // this element (a DOM overlay pinned to z-index 9999, i.e. always painted
-  // above the WebGL canvas) squarely overlapped for any piece taller than
-  // ~92px -- common at desktop cell sizes, where the 3D placement-guide
-  // mesh (handle.setPlacementPreview, threeScene.js) sits directly under the
-  // SAME pointer position this floating piece is centered on. Lifting by the
-  // piece's own full height (plus a small gap) instead of a flat constant
-  // means the floating piece's bottom edge always clears above the guide's
-  // footprint, regardless of piece size, so the highlighted landing cells
-  // stay visible while dragging. Clamped to a small positive top so a drag
-  // that starts near the very top of the viewport doesn't push the piece
-  // off-screen. Uses the full boxH (not boxH/2) as the lift so the element
-  // ends up entirely above the pointer's Y position (plus the gap), rather
-  // than straddling it -- that's what guarantees it can never overlap a
-  // same-size guide footprint centered on that same pointer.
+  // drag-preview-distance fix (block-blast-hud-pass, revision of the
+  // 2026-07-29 "drag-preview-covers-guide" fix): that pass lifted the
+  // floating piece by its own FULL on-screen height (plus a small gap) to
+  // guarantee zero overlap with the same-size 3D placement guide underneath
+  // -- correct at the cell sizes that existed then, but the stage's viewport-
+  // scaled sizing was loosened afterward (max square grew to 720px, see
+  // currentSize() below) which grew cellPx (and therefore boxH) considerably.
+  // Since the lift scaled 1:1 with boxH, the floating piece ended up FAR
+  // above the actual landing cells at larger viewport widths -- exactly the
+  // "floating piece is far from the grid" regression reported. The
+  // placement itself was never wrong (updateDragPreview/endDrag both read
+  // the SAME raw clientX/clientY as this function, unaffected by the lift --
+  // only this DOM element's visual position was offset), but a lift that
+  // grows unbounded with cell size reads as broken regardless.
+  //
+  // Fix: cap the lift at a fixed maximum (independent of piece/cell size) --
+  // small pieces at typical cell sizes still get the FULL clearance (no
+  // guide overlap, same as before), but oversized pieces/cell sizes no
+  // longer drag the floating piece increasingly far from the cursor. A
+  // capped lift can partially overlap the guide for large pieces at large
+  // cell sizes, which is why the floating piece is also given a lower
+  // opacity (0.75, down from the base 0.92 default) while dragging, so the
+  // guide is still visible through any partial overlap.
   const GUIDE_CLEARANCE_GAP = 18;
-  const lift = boxH + GUIDE_CLEARANCE_GAP;
+  const MAX_LIFT_PX = 90; // keeps the floating piece visibly close to the pointer/grid even at large cell sizes
+  const lift = Math.min(boxH, MAX_LIFT_PX) + GUIDE_CLEARANCE_GAP;
+  floatingPieceEl.style.opacity = '0.75';
   floatingPieceEl.style.left = (clientX - boxW / 2) + 'px';
   floatingPieceEl.style.top = Math.max(4, clientY - boxH / 2 - lift) + 'px';
 }

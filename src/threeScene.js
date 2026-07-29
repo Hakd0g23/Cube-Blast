@@ -83,23 +83,26 @@ const BACKDROP_DEPTH = BOARD_SIZE * 0.75; // how far behind the board plane the 
 //   - Everything else (derived, not independently chosen) becomes the
 //     bottom margin, clearing the DOM tray row with room to spare.
 //
-// mascot-side-placement (2026-07-29): superseded this pass's original
-// "mascots stand below the board on a ledge" framing entirely -- the user
-// asked for them relocated to flank the board's LEFT/RIGHT sides instead.
-// Since the container is a fixed SQUARE and cubes must stay undistorted
-// (world-units-per-pixel equal on both axes -- see resize() below), the
-// board's own vertical fraction (BOARD_FRAC) directly determines how much
-// horizontal margin exists on either side of it too: a smaller BOARD_FRAC
-// zooms the whole scene out, which shrinks the board somewhat but frees up
-// real side-margin room for the now much-bigger (3x, per the brief) side
-// mascots. Dropped from the original 0.53 to 0.48 -- a real, deliberate
-// trade-off (board renders ~9% smaller linearly) made specifically to give
-// "clearly visible, 300%-bigger, standing beside the board" mascots enough
-// room; see MASCOT_SIDE_MARGIN_WORLD below for the resulting per-side
-// budget. Re-tuned by eye against real screenshots, not a closed-form
-// derivation -- if index.html's queue/tray row CSS or the mascot scale
-// values change materially, re-check this framing against a fresh
-// screenshot rather than assuming it still holds.
+// mascot-side-placement (2026-07-29, superseded by mascot-flank-tray below):
+// originally flanked the board's LEFT/RIGHT sides at 3x scale, which needed
+// BOARD_FRAC dropped from 0.53 to 0.48 to free real side-margin room for
+// such large figures.
+//
+// mascot-flank-tray (block-blast-hud-pass): per user feedback, the board
+// itself read as too small on mobile widths with that much side margin
+// permanently reserved for tall mascots. Mascots+pets are relocated to flank
+// the TRAY row instead (see MASCOT_SCALE_MULTIPLIER/MASCOT_CLUSTER_INNER_GAP
+// below -- shrunk back down from 3x to a small "flanking a small tray"
+// scale), which needs much less horizontal margin -- BOARD_FRAC bumped from
+// 0.48 up to 0.64 (even above the original pre-mascot 0.53) to reclaim that
+// freed width/height for a visibly bigger grid, which is exactly the
+// mobile-width goal this pass is for. Since the container is a fixed SQUARE
+// and cubes must stay undistorted (world-units-per-pixel equal on both axes
+// -- see resize() below), BOARD_FRAC directly determines how much side
+// margin exists for the now-much-smaller mascots too; re-tuned by eye
+// against real screenshots, not a closed-form derivation -- if the mascot
+// scale or the tray/queue row CSS change materially, re-check this framing
+// against a fresh screenshot rather than assuming it still holds.
 const BOARD_WORLD_HALF_HEIGHT = BOARD_HALF + CUBE_FOOTPRINT / 2; // board's own top/bottom (and, since square, left/right) edge distance from center
 // re-loosened (block-blast-hud-pass, queue-clip-fix): 0.07 (tightened
 // 2026-07-29 for the "too much dead air" complaint) turned out to be
@@ -114,7 +117,7 @@ const BOARD_WORLD_HALF_HEIGHT = BOARD_HALF + CUBE_FOOTPRINT / 2; // board's own 
 // "looking about right" -- re-check against a fresh screenshot/measurement
 // if the queue row's own CSS (slot size, gap, label) changes again.
 const TOP_UI_MARGIN_FRAC = 0.115;
-const BOARD_FRAC = 0.48;
+const BOARD_FRAC = 0.64;
 const TOTAL_WORLD_HEIGHT = (2 * BOARD_WORLD_HALF_HEIGHT) / BOARD_FRAC;
 const FRUSTUM_TOP_WORLD = BOARD_WORLD_HALF_HEIGHT + TOP_UI_MARGIN_FRAC * TOTAL_WORLD_HEIGHT;
 // tray-gap-fix (2026-07-29): the DOM #three-tray-row used to be pinned to
@@ -219,7 +222,11 @@ const MASCOT_CLUSTER_CENTER_X = BOARD_WORLD_HALF_HEIGHT + MASCOT_SIDE_MARGIN_WOR
 // createThreeScene) so the dedicated mascot lighting added below can share
 // the exact same Z the mascot loader positions them at.
 const MASCOT_STAND_Z = CUBE_HEIGHT / 2 + 0.5;
-const MASCOT_CLUSTER_INNER_GAP = 1.5; // world units between the two mascots within one side cluster (bigger than the old 0.85 -- these are ~3x the size now)
+// mascot-flank-tray: shrunk from 1.5 (tuned for 3x-scale mascots) now that
+// MASCOT_SCALE_MULTIPLIER is back down near its original size -- a smaller
+// figure needs a proportionally smaller gap to its own pet to still read as
+// one cluster instead of two strangers standing apart.
+const MASCOT_CLUSTER_INNER_GAP = 0.7;
 function sideClusterX(side, indexInCluster, clusterCount) {
   const center = side * MASCOT_CLUSTER_CENTER_X;
   if (clusterCount === 1) return center;
@@ -227,9 +234,13 @@ function sideClusterX(side, indexInCluster, clusterCount) {
   const t = indexInCluster / (clusterCount - 1); // 0..1 across this cluster's own span
   return center - halfSpan + t * (2 * halfSpan);
 }
-// mascot-scale-pass (2026-07-29): "make the mascots 300% bigger" -- literal
-// 3x of the prior below-the-board targetHeight values (1.05/0.48/1.0/0.36).
-const MASCOT_SCALE_MULTIPLIER = 3;
+// mascot-flank-tray (block-blast-hud-pass): reverted the 2026-07-29 "make the
+// mascots 300% bigger" pass -- these no longer flank the whole BOARD (where
+// bigger figures made sense next to an 8x8 grid), they flank the much
+// smaller TRAY row instead, so a small companion-scale figure reads
+// correctly again. 1.15 is a slight bump over the original un-scaled 1x
+// values (still small, just not "shrunk into the background").
+const MASCOT_SCALE_MULTIPLIER = 1.15;
 const MASCOTS = [
   // Left cluster: boy + dog, facing right (+X, toward the board).
   { url: new URL('../assets/mascots/Character_Male_1.gltf', import.meta.url).href, targetHeight: 1.05 * MASCOT_SCALE_MULTIPLIER, x: sideClusterX(-1, 0, 2), side: -1 },
@@ -393,7 +404,11 @@ export function createThreeScene(container) {
   // and slightly in front so it lights faces/fronts rather than washing out
   // from directly overhead. No shadow casting (would double up on the key
   // light's own shadow work for no real depth-cue benefit here).
-  const mascotLightY = BOARD_BOTTOM_EDGE + 2.6; // roughly chest/head height for a 3x-scaled human mascot
+  // mascot-flank-tray: lowered from +2.6 (chest/head height for the old
+  // 3x-scaled mascots) to roughly match the much smaller MASCOT_SCALE_MULTIPLIER
+  // now in use -- a light aimed at the old height would sit well above these
+  // mascots' actual heads.
+  const mascotLightY = BOARD_BOTTOM_EDGE + 1.0;
   const mascotLightRange = MASCOT_SIDE_MARGIN_WORLD * 2.8;
   const mascotLeftLight = new THREE.PointLight(0xfff3e0, 16, mascotLightRange, 1.7);
   mascotLeftLight.position.set(-MASCOT_CLUSTER_CENTER_X, mascotLightY, MASCOT_STAND_Z + 2.6);
