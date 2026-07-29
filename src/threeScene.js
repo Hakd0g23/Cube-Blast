@@ -101,7 +101,13 @@ const BACKDROP_DEPTH = BOARD_SIZE * 0.75; // how far behind the board plane the 
 // values change materially, re-check this framing against a fresh
 // screenshot rather than assuming it still holds.
 const BOARD_WORLD_HALF_HEIGHT = BOARD_HALF + CUBE_FOOTPRINT / 2; // board's own top/bottom (and, since square, left/right) edge distance from center
-const TOP_UI_MARGIN_FRAC = 0.14;
+// tightened 2026-07-29 per user screenshot feedback: 0.14 read as too much
+// dead air between the DOM shard-queue row and the board's top edge now that
+// BOARD_FRAC=0.48 and the mascots sit beside (not below) the board -- 0.07
+// still clears the queue row's rendered height with some breathing room, just
+// not a near-empty band. Re-check against a fresh screenshot if the queue
+// row's own CSS height changes.
+const TOP_UI_MARGIN_FRAC = 0.07;
 const BOARD_FRAC = 0.48;
 const TOTAL_WORLD_HEIGHT = (2 * BOARD_WORLD_HALF_HEIGHT) / BOARD_FRAC;
 const FRUSTUM_TOP_WORLD = BOARD_WORLD_HALF_HEIGHT + TOP_UI_MARGIN_FRAC * TOTAL_WORLD_HEIGHT;
@@ -792,24 +798,63 @@ export function createThreeScene(container) {
   function isPetMascot(entry) {
     return entry.name === 'Dog' || entry.name === 'Cat';
   }
+  // mascot-reaction-cadence (2026-07-29): per user screenshot feedback,
+  // reactions were both too rare (only line-clear events fired one) AND, on
+  // a big clear, all four mascots snapped into the identical clip in
+  // lockstep -- read as robotic/synchronized rather than lively. Two
+  // independent fixes, both tuned by eye rather than derived:
+  //   - MASCOT_STAGGER_MIN_MS/MAX_MS: each mascot's reaction on a shared
+  //     event (big clear, or the rare simultaneous-pair below) now starts
+  //     after its own random delay in this range instead of all at once.
+  //   - Each mascot also independently rolls between its two known clips
+  //     (the small- and big-clear clip for its type) on every reaction, so
+  //     a 4-mascot big-clear volley shows a mix of clips, not 4 copies of
+  //     one.
+  //   - PLACEMENT_REACT_CHANCE: ordinary placements (no line clear) now
+  //     have a flat chance to trigger a single-mascot reaction too, via
+  //     triggerLandingAnim (called on every placement) -- previously only
+  //     clear events reacted at all, which made reactions feel rare in
+  //     normal (non-clearing) play.
+  const MASCOT_STAGGER_MIN_MS = 80;
+  const MASCOT_STAGGER_MAX_MS = 200;
+  const PLACEMENT_REACT_CHANCE = 0.2; // 20% of ordinary (non-clearing) placements
+  function staggerDelay() {
+    return MASCOT_STAGGER_MIN_MS + Math.random() * (MASCOT_STAGGER_MAX_MS - MASCOT_STAGGER_MIN_MS);
+  }
+  function reactSingle(entry, big) {
+    if (!entry || !entry.mixer) return;
+    const pet = isPetMascot(entry);
+    // Independently roll between this mascot's two known clips so a group
+    // reaction doesn't play one identical clip on every mascot at once.
+    const useBigClip = big ? Math.random() < 0.75 : Math.random() < 0.25;
+    const clip = useBigClip ? (pet ? 'Jump_Start' : 'Yes') : (pet ? 'Headbutt' : 'Wave');
+    fadeToAction(entry, clip, big ? 0.12 : 0.15, true);
+  }
   function triggerMascotReact(lineCount, bigClear) {
     if (!lineCount || lineCount <= 0) return;
     const big = !!bigClear || lineCount >= 3;
     if (big) {
-      // Bigger/more emphatic reaction: ALL FOUR mascots react at once, with
-      // a more energetic clip than the small-clear case (humans: 'Yes'
-      // instead of 'Wave'; pets: 'Jump_Start' instead of 'Headbutt').
+      // Bigger/more emphatic reaction: all four mascots react, staggered by
+      // MASCOT_STAGGER_MIN_MS-MAX_MS each so they don't snap in lockstep,
+      // each independently rolling its own clip (see reactSingle above).
       for (const entry of mascots) {
         if (!entry.mixer) continue;
-        fadeToAction(entry, isPetMascot(entry) ? 'Jump_Start' : 'Yes', 0.12, true);
+        setTimeout(() => reactSingle(entry, true), staggerDelay());
       }
     } else if (mascots.length) {
       const entry = mascots[reactRotor % mascots.length];
       reactRotor++;
-      if (entry && entry.mixer) {
-        fadeToAction(entry, isPetMascot(entry) ? 'Headbutt' : 'Wave', 0.15, true);
-      }
+      reactSingle(entry, false);
     }
+  }
+  // Ordinary-placement reaction hook: called from triggerLandingAnim below
+  // (fires on every placement regardless of whether it cleared a line), so
+  // reactions show up in normal play too, not just on clears.
+  function maybeReactToPlacement() {
+    if (!mascots.length) return;
+    if (Math.random() >= PLACEMENT_REACT_CHANCE) return;
+    const entry = mascots[Math.floor(Math.random() * mascots.length)];
+    reactSingle(entry, false);
   }
 
   // ---- input-raycasting (workstream: input-raycasting) ------------------
@@ -903,6 +948,9 @@ export function createThreeScene(container) {
   function triggerLandingAnim(cells, r0, c0) {
     const now = vnow();
     for (const [dr, dc] of cells) landingAnims.set(`${r0 + dr},${r0 + dc}`, { startedAt: now });
+    // mascot-reaction-cadence: fires on every placement (not just clears) --
+    // see maybeReactToPlacement() above.
+    maybeReactToPlacement();
   }
   function updateLandingAnims(now) {
     for (const entry of cubes) {
@@ -1210,6 +1258,13 @@ export function createThreeScene(container) {
     }
   }
 
+  // getCellSizePx (threeBootstrap-DOM-drag-preview-sizing addition,
+  // 2026-07-29): last CSS-pixel width/height resize() was called with, kept
+  // so getCellSizePx() can recompute after every resize without needing its
+  // own args threaded through. resize() is always called with CSS pixels
+  // (see threeBootstrap.js's handle.resize(width, height) call site), same
+  // units renderer.domElement's on-screen box is measured in.
+  let lastResizeHeightPx = null;
   function resize(width, height) {
     // scene-layout-cleanup: asymmetric top/bottom (FRUSTUM_TOP_WORLD /
     // FRUSTUM_BOTTOM_WORLD, computed near the top of this file) replace the
@@ -1232,6 +1287,26 @@ export function createThreeScene(container) {
     composer.setSize(width, height);
     composer.setPixelRatio(pixelRatio);
     bloomPass.setSize(width, height);
+    lastResizeHeightPx = height;
+  }
+
+  // getCellSizePx(): current on-screen pixel size of one board grid cell
+  // (square, per CELL_STRIDE's world-units-per-cell == 1 construction and
+  // resize()'s equal-world-units-per-pixel-on-both-axes guarantee -- see
+  // that function's own comment). Projects CELL_STRIDE world units through
+  // the orthographic camera's current (camera.top - camera.bottom) world
+  // span divided by the last CSS-pixel height resize() saw, i.e. world-
+  // units-per-pixel, inverted. Stays accurate across resize() calls since
+  // it re-reads both the camera's live frustum and lastResizeHeightPx every
+  // call rather than caching a px value. Added for threeBootstrap.js's DOM
+  // floating drag-preview piece, which previously hardcoded a 72px/24px-
+  // per-cell box that no longer matches the real board once BOARD_FRAC
+  // made the stage scale responsively.
+  function getCellSizePx() {
+    if (!lastResizeHeightPx) return 0;
+    const worldSpan = camera.top - camera.bottom;
+    const worldUnitsPerPx = worldSpan / lastResizeHeightPx;
+    return CELL_STRIDE / worldUnitsPerPx;
   }
 
   // mascot-idle-animation: last vnow() render() saw, used to derive a
@@ -1326,6 +1401,8 @@ export function createThreeScene(container) {
     render,
     dispose,
     setBoardState,
+    // threeBootstrap-DOM-drag-preview-sizing addition:
+    getCellSizePx,
     // input-raycasting additions:
     pointerToBoardXY,
     cellAnchorFromWorld,
