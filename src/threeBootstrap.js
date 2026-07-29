@@ -439,6 +439,18 @@ if (THREE_PREVIEW) {
     }
     resizeToViewport();
     window.addEventListener('resize', resizeToViewport);
+    // orientationchange-resize-fix: mobile Safari (and some Android WebViews,
+    // relevant for this project's Capacitor wrapper) fire 'resize' on device
+    // rotation too, but window.innerWidth/innerHeight can still report the
+    // PRE-rotation values for a brief window while the rotation animation is
+    // still in flight, before settling to the new values a beat later --
+    // relying on 'resize' alone risks resizeToViewport() reading stale
+    // dimensions right at the moment of rotation. Re-running once more after
+    // a short delay (after the visual rotation has settled) is the standard,
+    // well-documented workaround, independent of the immediate 'resize' call
+    // above (kept, since it still gives an instant response for the common
+    // "no stale-dimension window" case).
+    window.addEventListener('orientationchange', () => setTimeout(resizeToViewport, 200));
 
     // Pulls the live src/core.js game state (the SAME state object real
     // Canvas 2D pointer-drag input mutates via src/main.js's
@@ -625,11 +637,6 @@ if (THREE_PREVIEW) {
           // the queue straight into the tray) -- it's cosmetic feedback on
           // the cells themselves, not tied to the queue-arc mechanic below.
           handle.triggerBreakEffect(payload.rows, payload.cols, payload.color);
-          // mascot-reactions: same "any real clear" gate: humanoids/pets
-          // react to a small clear, all four react bigger on a combo/bigClear,
-          // and comboStreak/wholeFieldClear escalate further into a bigger
-          // "bounce pop" tier (see mascot-celebration-tiers, threeScene.js).
-          handle.triggerMascotReact(payload.lineCount, payload.bigClear, payload.comboStreak, payload.wholeFieldClear);
         }
         if (payload.lineCount > 0 && payload.newlyQueued > 0) {
           // Force the DOM queue-slot overlay to reflect the just-committed
@@ -665,18 +672,7 @@ if (THREE_PREVIEW) {
       lightCount: () => handle.scene.children.filter((o) => o.isLight).length,
       canvas: () => handle.renderer.domElement,
       renderOnce: () => handle.render(),
-      // mascot-prop-placement additions:
       ledgePosition: () => ({ x: handle.ledge.position.x, y: handle.ledge.position.y, z: handle.ledge.position.z }),
-      mascotsReady: () => handle.mascotsLoaded.then(() => true),
-      mascotCount: () => handle.mascots.length,
-      mascotInfo: () =>
-        handle.mascots.map((m) => ({
-          name: m.name,
-          x: m.root.position.x,
-          y: m.root.position.y,
-          z: m.root.position.z,
-          scale: m.root.scale.x,
-        })),
       // texture-to-material-mapping additions:
       materialsReady: () => handle.materialsReadyPromise,
       backdropTextureReady: () => handle.backdropTextureLoaded,
@@ -713,9 +709,6 @@ if (THREE_PREVIEW) {
       // break-effect-pass additions:
       breakFragmentCount: () => handle.breakFragmentCount(),
       isBreakEffectActive: () => handle.isBreakEffectActive(),
-      // mascot-reactions additions:
-      mascotActiveClip: (name) => handle.mascotActiveClip(name),
-      triggerMascotReact: (lineCount, bigClear, comboStreak, wholeFieldClear) => handle.triggerMascotReact(lineCount, bigClear, comboStreak, wholeFieldClear),
     };
   }
 }

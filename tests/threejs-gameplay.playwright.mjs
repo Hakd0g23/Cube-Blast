@@ -145,14 +145,12 @@ async function main() {
     const ready = await page.evaluate(async () => {
       const d = window.__threeDebug;
       const [materialsOk, backdropOk] = await Promise.all([d.materialsReady(), d.backdropTextureReady()]);
-      await d.mascotsReady();
       return {
         materialsOk,
         backdropOk,
         materialsFailed: d.materialsFailed(),
         backdropTextureFailed: d.backdropTextureFailed(),
         cubeCount: d.cubeCount(),
-        mascotCount: d.mascotCount(),
         cameraType: d.cameraType(),
       };
     });
@@ -161,7 +159,6 @@ async function main() {
     assert.equal(ready.materialsFailed, false);
     assert.equal(ready.backdropTextureFailed, false);
     assert.equal(ready.cubeCount, 64);
-    assert.ok(ready.mascotCount >= 1, 'expected at least one mascot');
     assert.equal(ready.cameraType, 'OrthographicCamera');
     // Confirm Three.js is genuinely the active renderer, not just present.
     const mount = await page.evaluate(() => ({
@@ -182,7 +179,7 @@ async function main() {
     await page.waitForFunction(() => !!window.__threeDebug);
     await page.evaluate(async () => {
       const d = window.__threeDebug;
-      await Promise.all([d.materialsReady(), d.backdropTextureReady(), d.mascotsReady()]);
+      await Promise.all([d.materialsReady(), d.backdropTextureReady()]);
     });
 
     const boardBefore = await page.evaluate(() => window.__fractureDebug.getState().board.map((row) => row.map((c) => !!c)));
@@ -244,7 +241,6 @@ async function main() {
       await Promise.all([
         window.__threeDebug.materialsReady(),
         window.__threeDebug.backdropTextureReady(),
-        window.__threeDebug.mascotsReady(),
       ]);
     });
 
@@ -293,7 +289,6 @@ async function main() {
       await Promise.all([
         window.__threeDebug.materialsReady(),
         window.__threeDebug.backdropTextureReady(),
-        window.__threeDebug.mascotsReady(),
       ]);
     });
 
@@ -380,7 +375,6 @@ async function main() {
       await Promise.all([
         window.__threeDebug.materialsReady(),
         window.__threeDebug.backdropTextureReady(),
-        window.__threeDebug.mascotsReady(),
       ]);
     });
 
@@ -463,7 +457,6 @@ async function main() {
       await Promise.all([
         window.__threeDebug.materialsReady(),
         window.__threeDebug.backdropTextureReady(),
-        window.__threeDebug.mascotsReady(),
       ]);
     });
 

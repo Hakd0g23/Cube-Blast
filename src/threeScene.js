@@ -26,7 +26,6 @@
 // instead of the 2D renderer's flat grid-line stroke.
 
 import * as THREE from 'https://unpkg.com/three@0.180.0/build/three.module.js';
-import { GLTFLoader } from 'https://unpkg.com/three@0.180.0/examples/jsm/loaders/GLTFLoader.js';
 // neon-blocks-pass: bloom post-processing so emissive "neon" cube faces
 // actually read as glowing rather than just a slightly brighter flat color.
 // Same pinned three@0.180.0 CDN version as the GLTFLoader import above, so
@@ -145,8 +144,9 @@ export const BOARD_TOP_FRAC = TOP_UI_MARGIN_FRAC;
 const FRUSTUM_BOTTOM_WORLD = FRUSTUM_TOP_WORLD - TOTAL_WORLD_HEIGHT;
 // Per-side horizontal room outside the board's own footprint (aspect=1
 // container, so the same TOTAL_WORLD_HEIGHT applies horizontally too, per
-// resize()'s uniform-world-units-per-pixel requirement).
-const MASCOT_SIDE_MARGIN_WORLD = (TOTAL_WORLD_HEIGHT - 2 * BOARD_WORLD_HALF_HEIGHT) / 2;
+// resize()'s uniform-world-units-per-pixel requirement). Used to spread the
+// ambient side-decor particles below.
+const SIDE_MARGIN_WORLD = (TOTAL_WORLD_HEIGHT - 2 * BOARD_WORLD_HALF_HEIGHT) / 2;
 
 // ---- juice-effects-port constants (workstream: juice-effects-port) --------
 // Ported 1:1 from src/main.js's GDD-12 juice-pass numbers (same durations/
@@ -194,83 +194,6 @@ const LEDGE_WIDTH = BOARD_SIZE + 1.5; // a bit wider than the board
 // backdrop reads as a clean neon-arcade void rather than a textured wall.
 const BACKDROP_SIZE = BOARD_SIZE * 3; // matches backdropGeo's PlaneGeometry dimensions below
 
-// Mascot glTF assets (real Quaternius CC0 static meshes, per GDD 4A's
-// locked static/non-rigged decision) — self-contained single-file glTF
-// (base64-embedded buffers/images), copied from the audited source pack
-// into assets/mascots/ so the game doesn't depend on the user's Downloads
-// folder at runtime.
-//
-// mascot-swap (2026-07-28): replaced the original Chicken/Zombie pair with
-// a girl, boy, dog, and cat to match the "Block Blast!"-style reference
-// (humanoid mascots + a dog/cat). Source: Characters/glTF/Character_Female_1
-// .gltf, Characters/glTF/Character_Male_1.gltf, Animals/glTF/Dog.gltf,
-// Animals/glTF/Cat.gltf from the same audited Quaternius pack, all
-// confirmed self-contained (no external .bin/texture references).
-//
-// mascot-side-placement (2026-07-29): re-confirmed clustering ("boy and dog
-// on left side cat and girl on right side" -- same Male+Dog / Female+Cat
-// pairing as the earlier below-the-board layout) but relocated from the
-// ledge to flank the board's left/right sides, standing on the same implied
-// floor level the board's own bottom edge sits on (BOARD_BOTTOM_EDGE) rather
-// than a raised shelf. sideClusterX(side, indexInCluster, clusterCount)
-// centers each pair within its own side's MASCOT_SIDE_MARGIN_WORLD budget
-// (computed above from BOARD_FRAC), pushed most of the way out toward the
-// frustum edge so they read as flanking the board, not crowding it.
-const MASCOT_CLUSTER_CENTER_X = BOARD_WORLD_HALF_HEIGHT + MASCOT_SIDE_MARGIN_WORLD * 0.5;
-// How far in front of the board plane the side mascots stand -- independent
-// of the ledge (they no longer stand on it). Module-level (not inside
-// createThreeScene) so the dedicated mascot lighting added below can share
-// the exact same Z the mascot loader positions them at.
-const MASCOT_STAND_Z = CUBE_HEIGHT / 2 + 0.5;
-// mascot-tray-flank-fix (2026-07-29, supersedes mascot-flank-tray): the
-// PRIOR "flank the tray" pass (commit 259c413) planted mascot FEET exactly
-// on BOARD_BOTTOM_EDGE -- the board's own bottom edge, i.e. the boundary
-// line between the grid and the below-board margin -- not actually beside
-// the DOM tray row, which renders further down still (past a gap, in
-// threeBootstrap.js's resizeToViewport). Since mascot height extends UPWARD
-// from the feet, standing them exactly on that boundary let their bodies
-// read as overlapping/crowding the grid's bottom row rather than sitting
-// beside the tray below it, which is what was actually asked for (confirmed
-// via mobile-viewport screenshots showing mascots hugging the grid's bottom
-// edge, not flanking the tray band beneath it).
-//
-// Drops mascot feet further down into the below-board margin so they
-// visually land beside the tray row instead of at the grid boundary. Derived
-// from FRUSTUM_BOTTOM_WORLD/BOARD_BOTTOM_EDGE (both already computed above)
-// rather than a bare magic number, and expressed as a FRACTION of the total
-// below-board margin so it stays correct if BOARD_FRAC/TOP_UI_MARGIN_FRAC are
-// re-tuned later -- 0.45 was picked by eye against a real mobile screenshot
-// (roughly centers the mascot cluster on the DOM tray row's own vertical
-// band without needing to reach into threeBootstrap.js's DOM measurements
-// from this module).
-const MASCOT_Y_DROP = (BOARD_BOTTOM_EDGE - FRUSTUM_BOTTOM_WORLD) * 0.45;
-// mascot-flank-tray: shrunk from 1.5 (tuned for 3x-scale mascots) now that
-// MASCOT_SCALE_MULTIPLIER is back down near its original size -- a smaller
-// figure needs a proportionally smaller gap to its own pet to still read as
-// one cluster instead of two strangers standing apart.
-const MASCOT_CLUSTER_INNER_GAP = 0.7;
-function sideClusterX(side, indexInCluster, clusterCount) {
-  const center = side * MASCOT_CLUSTER_CENTER_X;
-  if (clusterCount === 1) return center;
-  const halfSpan = (MASCOT_CLUSTER_INNER_GAP * (clusterCount - 1)) / 2;
-  const t = indexInCluster / (clusterCount - 1); // 0..1 across this cluster's own span
-  return center - halfSpan + t * (2 * halfSpan);
-}
-// mascot-flank-tray (block-blast-hud-pass): reverted the 2026-07-29 "make the
-// mascots 300% bigger" pass -- these no longer flank the whole BOARD (where
-// bigger figures made sense next to an 8x8 grid), they flank the much
-// smaller TRAY row instead, so a small companion-scale figure reads
-// correctly again. 1.15 is a slight bump over the original un-scaled 1x
-// values (still small, just not "shrunk into the background").
-const MASCOT_SCALE_MULTIPLIER = 1.15;
-const MASCOTS = [
-  // Left cluster: boy + dog, facing right (+X, toward the board).
-  { url: new URL('../assets/mascots/Character_Male_1.gltf', import.meta.url).href, targetHeight: 1.05 * MASCOT_SCALE_MULTIPLIER, x: sideClusterX(-1, 0, 2), side: -1 },
-  { url: new URL('../assets/mascots/Dog.gltf', import.meta.url).href, targetHeight: 0.48 * MASCOT_SCALE_MULTIPLIER, x: sideClusterX(-1, 1, 2), side: -1 },
-  // Right cluster: girl + cat, facing left (-X, toward the board).
-  { url: new URL('../assets/mascots/Character_Female_1.gltf', import.meta.url).href, targetHeight: 1.0 * MASCOT_SCALE_MULTIPLIER, x: sideClusterX(1, 0, 2), side: 1 },
-  { url: new URL('../assets/mascots/Cat.gltf', import.meta.url).href, targetHeight: 0.36 * MASCOT_SCALE_MULTIPLIER, x: sideClusterX(1, 1, 2), side: 1 },
-];
 
 // ---- neon-blocks-pass: per-family neon material colors ------------------
 // Replaces texture-to-material-mapping's PNG-textured cube materials
@@ -416,33 +339,6 @@ export function createThreeScene(container) {
   accentRight.position.set(BOARD_SIZE * 0.55, -BOARD_SIZE * 0.1, CUBE_HEIGHT * 2);
   scene.add(accentRight);
 
-  // ---- mascot-lighting (2026-07-29) --------------------------------------
-  // Every light above is positioned/aimed for the BOARD -- the (now much
-  // bigger, side-mounted) mascots were reading as dark silhouettes against
-  // the board's own glow per feedback. One warm-white PointLight per side
-  // cluster, centered on where the mascots actually stand now
-  // (MASCOT_CLUSTER_CENTER_X/MASCOT_STAND_Z, both module-level so they stay
-  // in sync with the mascot loader's own placement below), positioned above
-  // and slightly in front so it lights faces/fronts rather than washing out
-  // from directly overhead. No shadow casting (would double up on the key
-  // light's own shadow work for no real depth-cue benefit here).
-  // mascot-flank-tray: lowered from +2.6 (chest/head height for the old
-  // 3x-scaled mascots) to roughly match the much smaller MASCOT_SCALE_MULTIPLIER
-  // now in use -- a light aimed at the old height would sit well above these
-  // mascots' actual heads.
-  // mascot-tray-flank-fix: mascots themselves dropped by MASCOT_Y_DROP (see
-  // that constant's comment) to stand beside the tray instead of right at
-  // the board's bottom edge -- the light needs to follow them down by the
-  // same amount so it still aims at their new head height, not the old one.
-  const mascotLightY = BOARD_BOTTOM_EDGE - MASCOT_Y_DROP + 1.0;
-  const mascotLightRange = MASCOT_SIDE_MARGIN_WORLD * 2.8;
-  const mascotLeftLight = new THREE.PointLight(0xfff3e0, 16, mascotLightRange, 1.7);
-  mascotLeftLight.position.set(-MASCOT_CLUSTER_CENTER_X, mascotLightY, MASCOT_STAND_Z + 2.6);
-  scene.add(mascotLeftLight);
-  const mascotRightLight = new THREE.PointLight(0xfff3e0, 16, mascotLightRange, 1.7);
-  mascotRightLight.position.set(MASCOT_CLUSTER_CENTER_X, mascotLightY, MASCOT_STAND_Z + 2.6);
-  scene.add(mascotRightLight);
-
   // ---- backdrop wall (GDD 4A, corrected 2026-07-28: front-on framing has
   // no floor visible — replaces the old ground/table stub plane with a flat
   // backdrop wall behind the board plane, facing the camera).
@@ -587,10 +483,10 @@ export function createThreeScene(container) {
     const side = i < SIDE_PARTICLE_COUNT_PER_SIDE ? -1 : 1;
     // Spread across the FULL side margin (from just outside the board's own
     // edge out to the frustum's outer edge) -- covers both the inner gap
-    // beside the board AND the outer gap beyond the mascot clusters, per the
+    // beside the board AND the outer gap beyond the side margin, per the
     // "bare space on both sides" report (not just the outermost strip).
     const marginT = Math.random(); // 0 = just past the board edge, 1 = frustum edge
-    const x = side * (BOARD_WORLD_HALF_HEIGHT + 0.6 + marginT * (MASCOT_SIDE_MARGIN_WORLD - 0.6));
+    const x = side * (BOARD_WORLD_HALF_HEIGHT + 0.6 + marginT * (SIDE_MARGIN_WORLD - 0.6));
     const y = FRUSTUM_BOTTOM_WORLD + Math.random() * TOTAL_WORLD_HEIGHT;
     // Between the board plane and the backdrop -- reads as background
     // atmosphere, never overlapping/occluding the board, mascots, or the
@@ -832,397 +728,6 @@ export function createThreeScene(container) {
   const SHARD_CHIP_WORLD = 16 * WORLD_UNITS_PER_PX; // matches 2D drawShardArcs' `size=16` chip footprint
   const shardChipGeo = new THREE.BoxGeometry(SHARD_CHIP_WORLD, SHARD_CHIP_WORLD, CUBE_HEIGHT * 0.3);
 
-  // ---- mascot props (static/non-rigged Quaternius glTF, GDD 4A) ---------
-  // Loaded async (GLTFLoader.loadAsync); each model's own bounding box is
-  // used to normalize scale to a target on-screen height (source pack
-  // meshes aren't authored to a shared scale) and to plant its feet exactly
-  // on the shared floor level (BOARD_BOTTOM_EDGE), rather than guessing a
-  // fixed scale/offset per file.
-  const gltfLoader = new GLTFLoader();
-  const mascots = [];
-  // mascot-idle-animation: every mascot glTF ships baked animation clips
-  // (an 'Idle' clip on all four, confirmed via node inspection), but until
-  // now nothing ever created an AnimationMixer/played a clip, so mascots
-  // rendered frozen in the raw bind pose. One AnimationMixer per mascot,
-  // driven from render()'s existing vnow()-derived delta below, so idle
-  // playback pauses/resumes exactly like every other juice-effects-port
-  // animation in this file.
-  const mascotMixers = [];
-  const mascotsLoaded = Promise.all(
-    MASCOTS.map((cfg) =>
-      gltfLoader.loadAsync(cfg.url).then((gltf) => {
-        const root = gltf.scene;
-        const box = new THREE.Box3().setFromObject(root);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-        const scale = size.y > 0 ? cfg.targetHeight / size.y : 1;
-        root.scale.setScalar(scale);
-
-        // mascot-side-placement (2026-07-29, supersedes mascot-head-tilt):
-        // now that mascots stand BESIDE the board instead of below it
-        // facing the camera, the old "pitch just the head bone up" pose
-        // doesn't make sense -- what reads correctly here is turning the
-        // WHOLE body to face inward, toward the grid, like a figure flanking
-        // a display case. Loaded models face the camera (+Z) at identity
-        // rotation (confirmed during the original below-the-board pass), so
-        // a +/-90 degree yaw around Y turns that forward vector to point at
-        // +X (facing right, for the left-side cluster) or -X (facing left,
-        // for the right-side cluster) -- applied BEFORE the post-scale
-        // bounding-box re-measure below so feetY/centerZOffset already
-        // reflect the rotated pose (a Y-axis rotation swaps the model's own
-        // X/Z footprint but leaves Y untouched, so foot height is still
-        // correct either way -- the Z-centering isn't, which is exactly why
-        // this ordering matters).
-        //
-        // mascot-face-camera (2026-07-29, per user screenshot feedback): a
-        // full 90-degree yaw put the mascots in strict profile -- faces
-        // never visible at all, just a silhouette. Backed off to 55 degrees
-        // (still turned mostly toward the board/grid, matching the "flanking
-        // a display case" framing above) so the face reads as a 3/4 view
-        // toward the camera instead of a pure side-on profile.
-        const MASCOT_YAW = Math.PI * (55 / 180);
-        root.rotation.y = cfg.side < 0 ? MASCOT_YAW : -MASCOT_YAW;
-
-        // Re-measure after scaling+rotating to plant feet on the shared
-        // floor level precisely (bounding box min.y is the model's lowest
-        // point).
-        const scaledBox = new THREE.Box3().setFromObject(root);
-        const feetY = scaledBox.min.y;
-        const centerZOffset = (scaledBox.max.z + scaledBox.min.z) / 2;
-        // mascot-tray-flank-fix: feet planted MASCOT_Y_DROP below the board's
-        // own bottom edge (not exactly on it) -- see that constant's comment.
-        root.position.set(cfg.x, BOARD_BOTTOM_EDGE - MASCOT_Y_DROP - feetY, MASCOT_STAND_Z - centerZOffset);
-        root.traverse((obj) => {
-          if (obj.isMesh) {
-            // mascot-side-placement: shadow-casting OFF (was on) -- now that
-            // mascots are 3x bigger and standing out at
-            // MASCOT_CLUSTER_CENTER_X (near/outside keyLight's shadow-camera
-            // frustum, which is sized for the BOARD's own footprint,
-            // shadowExtent = BOARD_SIZE*0.9), their cast shadows clipped
-            // against that frustum boundary into a large, wrong-looking dark
-            // blob across the backdrop -- confirmed via screenshot, not
-            // assumed. A correctly-sized shadow camera for the mascots isn't
-            // worth the complexity here; still receiving shadows (so the
-            // board/ledge can shade them) reads fine without casting their
-            // own.
-            obj.castShadow = false;
-            obj.receiveShadow = true;
-          }
-        });
-        scene.add(root);
-        const entry = { name: cfg.url.split('/').pop().replace('.gltf', ''), root, clips: [], actions: {}, activeAction: null, activeActionName: null, mixer: null, baseScale: scale, bouncePop: null, baseYaw: root.rotation.y };
-        const clips = gltf.animations || [];
-        entry.clips = clips;
-        if (clips.length) {
-          const mixer = new THREE.AnimationMixer(root);
-          // Prefer an 'Idle' clip by name (case-insensitive); fall back to
-          // the first clip in the file if a mascot's clip happens to be
-          // named differently, so idle playback never silently no-ops.
-          const idleClip =
-            clips.find((c) => /idle/i.test(c.name)) || clips[0];
-          const action = mixer.clipAction(idleClip);
-          action.setLoop(THREE.LoopRepeat, Infinity);
-          action.setEffectiveWeight(1);
-          action.play();
-          entry.mixer = mixer;
-          entry.idleClipName = idleClip.name;
-          entry.actions[idleClip.name] = action;
-          entry.actions.Idle = entry.actions.Idle || action; // alias so getAction(entry,'Idle') always resolves even if the real clip name differs
-          entry.activeAction = action;
-          entry.activeActionName = idleClip.name;
-          // mascot-reactions: fires when any LoopOnce reaction action this
-          // mascot plays finishes, fading back to its own idle clip. One
-          // listener per mixer (not per-action) -- mixer 'finished' events
-          // fire for ANY action on that mixer, so the guards below only act
-          // when the finished action is this mascot's CURRENT action (guards
-          // against a stale/superseded reaction's own late 'finished' event
-          // stomping on a newer one) and skip entirely if it's somehow the
-          // idle clip itself (defensive only -- Idle is always LoopRepeat,
-          // which never fires 'finished').
-          mixer.addEventListener('finished', (e) => {
-            if (e.action !== entry.activeAction) return;
-            if (e.action === entry.actions[entry.idleClipName]) return;
-            fadeToAction(entry, entry.idleClipName, 0.3, false);
-          });
-          mascotMixers.push(mixer);
-        }
-        mascots.push(entry);
-        return entry;
-      })
-    )
-  );
-
-  // ---- mascot-reactions (2026-07-29) -------------------------------------
-  // getAction()/fadeToAction() follow three.js's own documented multi-clip
-  // crossfade pattern (fadeOut the previous action, fadeIn + play the next),
-  // rather than clipAction.crossFadeTo -- that pattern needs both actions
-  // already "playing" with one at zero weight, which is more bookkeeping for
-  // no behavior difference here since every mascot only ever has ONE action
-  // active at a time (idle, or a reaction).
-  function getAction(entry, name) {
-    if (!entry.mixer) return null;
-    if (entry.actions[name]) return entry.actions[name];
-    const clip = entry.clips.find((c) => c.name === name);
-    if (!clip) return null;
-    const action = entry.mixer.clipAction(clip);
-    entry.actions[name] = action;
-    return action;
-  }
-  function fadeToAction(entry, name, duration = 0.2, loopOnce = false) {
-    const next = getAction(entry, name);
-    if (!next) return;
-    if (next === entry.activeAction) {
-      // Already playing this clip (e.g. a second reaction request lands
-      // while the first is still fading back to idle) -- restart it from
-      // the top rather than no-op, so a rapid-fire combo still visibly
-      // re-triggers the reaction instead of doing nothing.
-      next.reset();
-    }
-    if (loopOnce) {
-      next.setLoop(THREE.LoopOnce, 1);
-      next.clampWhenFinished = true;
-    } else {
-      next.setLoop(THREE.LoopRepeat, Infinity);
-      next.clampWhenFinished = false;
-    }
-    next.reset().setEffectiveTimeScale(1).setEffectiveWeight(1).fadeIn(duration).play();
-    const prev = entry.activeAction;
-    if (prev && prev !== next) prev.fadeOut(duration);
-    entry.activeAction = next;
-    entry.activeActionName = name;
-  }
-  // Small rotation through the 4 mascots for normal (non-big) clears, so
-  // repeated small clears don't always react on the exact same mascot.
-  let reactRotor = 0;
-  function isPetMascot(entry) {
-    return entry.name === 'Dog' || entry.name === 'Cat';
-  }
-  // mascot-reaction-cadence (2026-07-29): per user screenshot feedback,
-  // reactions were both too rare (only line-clear events fired one) AND, on
-  // a big clear, all four mascots snapped into the identical clip in
-  // lockstep -- read as robotic/synchronized rather than lively. Two
-  // independent fixes, both tuned by eye rather than derived:
-  //   - MASCOT_STAGGER_MIN_MS/MAX_MS: each mascot's reaction on a shared
-  //     event (big clear, or the rare simultaneous-pair below) now starts
-  //     after its own random delay in this range instead of all at once.
-  //   - Each mascot also independently rolls between its two known clips
-  //     (the small- and big-clear clip for its type) on every reaction, so
-  //     a 4-mascot big-clear volley shows a mix of clips, not 4 copies of
-  //     one.
-  //   - PLACEMENT_REACT_CHANCE: ordinary placements (no line clear) now
-  //     have a flat chance to trigger a single-mascot reaction too, via
-  //     triggerLandingAnim (called on every placement) -- previously only
-  //     clear events reacted at all, which made reactions feel rare in
-  //     normal (non-clearing) play.
-  const MASCOT_STAGGER_MIN_MS = 80;
-  const MASCOT_STAGGER_MAX_MS = 200;
-  const PLACEMENT_REACT_CHANCE = 0.2; // 20% of ordinary (non-clearing) placements
-  function staggerDelay() {
-    return MASCOT_STAGGER_MIN_MS + Math.random() * (MASCOT_STAGGER_MAX_MS - MASCOT_STAGGER_MIN_MS);
-  }
-  // mascot-celebration-tiers (2026-07-29): the existing Wave/Yes/Headbutt/
-  // Jump_Start reaction clips are the only celebration animations these glTF
-  // files ship (see mascot-swap above), so a bigger celebration for
-  // combos/perfect-clears can't reach for a third distinct clip -- instead
-  // this layers a temporary scale-up "pop" (same reused-tween approach as
-  // triggerZoomPulse's board-group scale bump above: a vnow()-timed
-  // sin-eased scalar, just applied per-mascot-root instead of to
-  // boardGroup) on TOP of whichever reaction clip is already playing, so
-  // escalating tiers read as "bigger jump" without needing new assets.
-  //   - line-clear (1-2 lines, not bigClear): existing single-mascot small
-  //     reaction, no pop (unchanged from before this pass).
-  //   - bigClear (3+ lines, or near-empty board): existing all-mascot big
-  //     reaction, no pop (unchanged from before this pass).
-  //   - combo (comboStreak >= 2, i.e. chained clears across placements):
-  //     all-mascot big reaction PLUS a moderate pop.
-  //   - perfect clear (wholeFieldClear): all-mascot big reaction plus the
-  //     largest pop, the biggest celebration in the game.
-  const MASCOT_BOUNCE_MS = 320;
-  const MASCOT_BOUNCE_PEAK_COMBO = 0.18; // scale multiplier bump, e.g. 1.0 -> 1.18 -> 1.0
-  const MASCOT_BOUNCE_PEAK_PERFECT = 0.32;
-  function triggerMascotBounce(entry, peak) {
-    if (!entry) return;
-    entry.bouncePop = { startedAt: vnow(), peak };
-  }
-  function updateMascotBounce(now) {
-    for (const entry of mascots) {
-      if (!entry.bouncePop) continue;
-      const t = (now - entry.bouncePop.startedAt) / MASCOT_BOUNCE_MS;
-      if (t >= 1) {
-        entry.bouncePop = null;
-        entry.root.scale.setScalar(entry.baseScale);
-        continue;
-      }
-      const bump = Math.sin(t * Math.PI) * entry.bouncePop.peak; // 0 -> peak -> 0
-      entry.root.scale.setScalar(entry.baseScale * (1 + bump));
-    }
-  }
-
-  // ---- pet-wander (block-blast-hud-pass, revision: replaces the earlier
-  // stationary "pet-idle-flavor" pass entirely -- Dog/Cat now actually roam
-  // around their own side of the scene using their real Walk/Run/Idle_Eating
-  // clips instead of standing frozen in one spot playing idle-in-place
-  // flavor). Independent of the human mascots and of each other -- no
-  // look-at/reacting-to-anyone behavior here, just believable ambient
-  // roaming, same "decorative, not wired to gameplay" scope as the rest of
-  // this module's mascot placement.
-  //
-  // Each pet's wander area is bounded to its OWN side's "yard" -- between the
-  // board's outer edge and a bit short of the frustum's own edge, and within
-  // a modest Z range around MASCOT_STAND_Z -- so it never wanders across the
-  // board, off past the visible play area, or into/behind the backdrop.
-  // Pairing (which human owns which pet, for the petting interaction below)
-  // is resolved by NAME once mascotsLoaded settles, same reasoning as the
-  // reverted greeting pass: mascots.push() happens independently inside each
-  // glTF's own .then(), so array order isn't guaranteed to match MASCOTS'
-  // declaration order.
-  const PET_WANDER_SPEED = 1.6; // world units/sec -- roughly a brisk walk for a ~1.4-unit-tall dog
-  const PET_WANDER_ARRIVE_EPS = 0.12;
-  const PET_PAUSE_MIN_MS = 2500;
-  const PET_PAUSE_MAX_MS = 5500;
-  const PET_EAT_CHANCE = 0.4; // odds a pause plays Idle_Eating flavor instead of a plain Idle hold
-  const YARD_Z_MIN = MASCOT_STAND_Z - 1.0;
-  const YARD_Z_MAX = MASCOT_STAND_Z + 1.6;
-  const YARD_INNER_X = BOARD_WORLD_HALF_HEIGHT + 0.3; // never cross this close to the board
-  const YARD_OUTER_MARGIN = MASCOT_SIDE_MARGIN_WORLD * 0.35; // stay a bit short of the frustum's own edge
-  let ownerPets = []; // [{ owner, pet }] once resolved
-  mascotsLoaded.then((entries) => {
-    const byName = Object.fromEntries(entries.map((e) => [e.name, e]));
-    ownerPets = [
-      { owner: byName.Character_Male_1, pet: byName.Dog, side: -1 },
-      { owner: byName.Character_Female_1, pet: byName.Cat, side: 1 },
-    ].filter((p) => p.owner && p.pet);
-    for (const { pet, side } of ownerPets) {
-      const outerX = MASCOT_CLUSTER_CENTER_X + YARD_OUTER_MARGIN;
-      pet.yard = side < 0 ? { xMin: -outerX, xMax: -YARD_INNER_X } : { xMin: YARD_INNER_X, xMax: outerX };
-      pet.wanderState = 'paused'; // 'paused' | 'walking' | 'interacting'
-      pet.wanderTarget = null;
-      pet.nextWanderAt = vnow() + 1000 + Math.random() * 3000; // short initial delay so pets don't all take off the instant they load
-      pet.pettingCooldownUntil = 0;
-      pet.interactingUntil = 0;
-    }
-  });
-  function pickWanderTarget(pet) {
-    const yard = pet.yard;
-    return {
-      x: yard.xMin + Math.random() * (yard.xMax - yard.xMin),
-      z: YARD_Z_MIN + Math.random() * (YARD_Z_MAX - YARD_Z_MIN),
-    };
-  }
-  function updatePetWander(now, deltaSec) {
-    for (const { pet } of ownerPets) {
-      if (pet.wanderState === 'interacting') continue; // petting interaction below owns movement/animation during this window
-      if (pet.wanderState === 'paused') {
-        if (now < pet.nextWanderAt) continue;
-        pet.wanderTarget = pickWanderTarget(pet);
-        pet.wanderState = 'walking';
-        // Mostly Walk, occasionally Run, for a bit of pace variety.
-        fadeToAction(pet, Math.random() < 0.25 ? 'Run' : 'Walk', 0.25, false);
-        continue;
-      }
-      // walking
-      const dx = pet.wanderTarget.x - pet.root.position.x;
-      const dz = pet.wanderTarget.z - pet.root.position.z;
-      const dist = Math.hypot(dx, dz);
-      if (dist <= PET_WANDER_ARRIVE_EPS || deltaSec <= 0) {
-        pet.wanderState = 'paused';
-        pet.nextWanderAt = now + PET_PAUSE_MIN_MS + Math.random() * (PET_PAUSE_MAX_MS - PET_PAUSE_MIN_MS);
-        if (Math.random() < PET_EAT_CHANCE) {
-          fadeToAction(pet, 'Idle_Eating', 0.3, true); // LoopOnce -- auto-fades back to Idle via the mixer 'finished' listener once it plays through
-        } else {
-          fadeToAction(pet, pet.idleClipName, 0.3, false);
-        }
-        continue;
-      }
-      // Forward vector at rotation.y=r is (sin r, 0, cos r) -- same
-      // convention confirmed during mascot-side-placement above -- so facing
-      // the direction of travel is atan2(dx, dz).
-      pet.root.rotation.y = Math.atan2(dx, dz);
-      const step = Math.min(dist, PET_WANDER_SPEED * deltaSec);
-      pet.root.position.x += (dx / dist) * step;
-      pet.root.position.z += (dz / dist) * step;
-    }
-  }
-
-  // ---- petting interaction (block-blast-hud-pass, revision: dropped the
-  // owner's 'Duck' clip entirely per user feedback -- it's a crouch pose and
-  // read as scared/skittish rather than affectionate petting. No replacement
-  // animation on the owner -- Character_Male_1.gltf/Character_Female_1.gltf
-  // don't ship a dedicated pet/interact clip (checked via animation-name
-  // inspection: Death/Duck/HitReact/Idle/Idle_Attack/Idle_Hold/Jump/
-  // Jump_Idle/Jump_Land/No/Punch/Run/Run_Attack/Run_Hold/Walk/Walk_Hold/
-  // Wave/Yes) and every other option reads wrong for this moment too
-  // (Wave/Yes are celebratory, Idle_Attack/Punch obviously wrong), so the
-  // owner is simply left in whatever they're already doing -- the pet
-  // stopping and settling into its own Idle pose next to its owner is the
-  // whole visible interaction cue now. Proximity trigger/cooldown logic is
-  // otherwise unchanged from the previous pass.
-  const PETTING_TRIGGER_DIST = 1.4;
-  const PETTING_HOLD_MS = 1700;
-  const PETTING_COOLDOWN_MS = 18000; // guards against re-triggering every frame while still in proximity
-  function updatePetting(now) {
-    for (const { owner, pet } of ownerPets) {
-      if (pet.wanderState === 'interacting') {
-        if (now >= pet.interactingUntil) {
-          pet.wanderState = 'paused';
-          pet.nextWanderAt = now + 800 + Math.random() * 1200; // brief beat before wandering off again
-          fadeToAction(pet, pet.idleClipName, 0.3, false);
-        }
-        continue;
-      }
-      if (now < pet.pettingCooldownUntil) continue;
-      const dx = pet.root.position.x - owner.root.position.x;
-      const dz = pet.root.position.z - owner.root.position.z;
-      if (Math.hypot(dx, dz) > PETTING_TRIGGER_DIST) continue;
-      pet.wanderState = 'interacting';
-      pet.interactingUntil = now + PETTING_HOLD_MS;
-      pet.pettingCooldownUntil = now + PETTING_COOLDOWN_MS;
-      fadeToAction(pet, pet.idleClipName, 0.25, false);
-    }
-  }
-
-  function reactSingle(entry, big) {
-    if (!entry || !entry.mixer) return;
-    const pet = isPetMascot(entry);
-    // Independently roll between this mascot's two known clips so a group
-    // reaction doesn't play one identical clip on every mascot at once.
-    const useBigClip = big ? Math.random() < 0.75 : Math.random() < 0.25;
-    const clip = useBigClip ? (pet ? 'Jump_Start' : 'Yes') : (pet ? 'Headbutt' : 'Wave');
-    fadeToAction(entry, clip, big ? 0.12 : 0.15, true);
-  }
-  function triggerMascotReact(lineCount, bigClear, comboStreak = 0, wholeFieldClear = false) {
-    if (!lineCount || lineCount <= 0) return;
-    const perfect = !!wholeFieldClear;
-    const combo = !perfect && comboStreak >= 2;
-    const big = !!bigClear || lineCount >= 3 || combo || perfect;
-    const bouncePeak = perfect ? MASCOT_BOUNCE_PEAK_PERFECT : (combo ? MASCOT_BOUNCE_PEAK_COMBO : 0);
-    if (big) {
-      // Bigger/more emphatic reaction: all four mascots react, staggered by
-      // MASCOT_STAGGER_MIN_MS-MAX_MS each so they don't snap in lockstep,
-      // each independently rolling its own clip (see reactSingle above).
-      for (const entry of mascots) {
-        if (!entry.mixer) continue;
-        setTimeout(() => {
-          reactSingle(entry, true);
-          if (bouncePeak > 0) triggerMascotBounce(entry, bouncePeak);
-        }, staggerDelay());
-      }
-    } else if (mascots.length) {
-      const entry = mascots[reactRotor % mascots.length];
-      reactRotor++;
-      reactSingle(entry, false);
-    }
-  }
-  // Ordinary-placement reaction hook: called from triggerLandingAnim below
-  // (fires on every placement regardless of whether it cleared a line), so
-  // reactions show up in normal play too, not just on clears.
-  function maybeReactToPlacement() {
-    if (!mascots.length) return;
-    if (Math.random() >= PLACEMENT_REACT_CHANCE) return;
-    const entry = mascots[Math.floor(Math.random() * mascots.length)];
-    reactSingle(entry, false);
-  }
-
   // ---- input-raycasting (workstream: input-raycasting) ------------------
   // Pointer-driven drag/drop lives in src/threeBootstrap.js (DOM tray slots
   // are the drag *source*), but "where would this land on the board" is a
@@ -1314,9 +819,6 @@ export function createThreeScene(container) {
   function triggerLandingAnim(cells, r0, c0) {
     const now = vnow();
     for (const [dr, dc] of cells) landingAnims.set(`${r0 + dr},${r0 + dc}`, { startedAt: now });
-    // mascot-reaction-cadence: fires on every placement (not just clears) --
-    // see maybeReactToPlacement() above.
-    maybeReactToPlacement();
   }
   function updateLandingAnims(now) {
     for (const entry of cubes) {
@@ -1675,13 +1177,6 @@ export function createThreeScene(container) {
     return CELL_STRIDE / worldUnitsPerPx;
   }
 
-  // mascot-idle-animation: last vnow() render() saw, used to derive a
-  // per-frame delta for AnimationMixer.update() (mixers need a delta, not
-  // an absolute timestamp). vnow() is already pause-safe/pinned while
-  // paused, so a delta computed from consecutive vnow() reads is 0 during
-  // pause and resumes cleanly, same guarantee every other effect above
-  // gets for free.
-  let lastMixerNow = null;
   function render() {
     // juice-effects-port: advance every vnow()-keyed effect once per frame,
     // BEFORE the actual GPU render call -- this is what makes pause/resume
@@ -1696,16 +1191,6 @@ export function createThreeScene(container) {
     updateZoomAndShake(now);
     updateCubeVisuals(now);
     updateSideParticles(now);
-    if (lastMixerNow === null) lastMixerNow = now;
-    const deltaMs = Math.max(0, now - lastMixerNow);
-    lastMixerNow = now;
-    const deltaSec = deltaMs / 1000;
-    if (deltaMs > 0 && mascotMixers.length) {
-      for (const mixer of mascotMixers) mixer.update(deltaSec);
-    }
-    updateMascotBounce(now);
-    updatePetWander(now, deltaSec);
-    updatePetting(now);
     if (isDeathFreezeActive(now)) return; // GDD 12.8 freeze-frame: skip this render call entirely, same as main.js's draw()-skip
     // neon-blocks-pass: composer.render() (RenderPass+UnrealBloomPass+
     // OutputPass) replaces the old direct renderer.render(scene, camera).
@@ -1765,9 +1250,6 @@ export function createThreeScene(container) {
     cubes,
     ground,
     ledge,
-    mascots,
-    mascotsLoaded,
-    mascotMixers,
     keyLight,
     fillLight,
     hemi,
@@ -1798,8 +1280,6 @@ export function createThreeScene(container) {
     // break-effect-pass addition:
     triggerBreakEffect,
     sideParticles,
-    // mascot-reactions addition:
-    triggerMascotReact,
     // verification-only getters (window.__threeDebug wires these up):
     landingAnimCount: () => landingAnims.size,
     shardArcCount: () => shardArcs.length,
@@ -1813,10 +1293,6 @@ export function createThreeScene(container) {
     cubeColor: (r, c) => {
       const entry = cubes.find((e) => e.r === r && e.c === c);
       return entry && entry.ownMaterial ? entry.ownMaterial.color.getHexString() : null;
-    },
-    mascotActiveClip: (name) => {
-      const entry = mascots.find((m) => m.name === name);
-      return entry && entry.activeActionName ? entry.activeActionName : null;
     },
   };
 }
