@@ -222,6 +222,28 @@ const MASCOT_CLUSTER_CENTER_X = BOARD_WORLD_HALF_HEIGHT + MASCOT_SIDE_MARGIN_WOR
 // createThreeScene) so the dedicated mascot lighting added below can share
 // the exact same Z the mascot loader positions them at.
 const MASCOT_STAND_Z = CUBE_HEIGHT / 2 + 0.5;
+// mascot-tray-flank-fix (2026-07-29, supersedes mascot-flank-tray): the
+// PRIOR "flank the tray" pass (commit 259c413) planted mascot FEET exactly
+// on BOARD_BOTTOM_EDGE -- the board's own bottom edge, i.e. the boundary
+// line between the grid and the below-board margin -- not actually beside
+// the DOM tray row, which renders further down still (past a gap, in
+// threeBootstrap.js's resizeToViewport). Since mascot height extends UPWARD
+// from the feet, standing them exactly on that boundary let their bodies
+// read as overlapping/crowding the grid's bottom row rather than sitting
+// beside the tray below it, which is what was actually asked for (confirmed
+// via mobile-viewport screenshots showing mascots hugging the grid's bottom
+// edge, not flanking the tray band beneath it).
+//
+// Drops mascot feet further down into the below-board margin so they
+// visually land beside the tray row instead of at the grid boundary. Derived
+// from FRUSTUM_BOTTOM_WORLD/BOARD_BOTTOM_EDGE (both already computed above)
+// rather than a bare magic number, and expressed as a FRACTION of the total
+// below-board margin so it stays correct if BOARD_FRAC/TOP_UI_MARGIN_FRAC are
+// re-tuned later -- 0.45 was picked by eye against a real mobile screenshot
+// (roughly centers the mascot cluster on the DOM tray row's own vertical
+// band without needing to reach into threeBootstrap.js's DOM measurements
+// from this module).
+const MASCOT_Y_DROP = (BOARD_BOTTOM_EDGE - FRUSTUM_BOTTOM_WORLD) * 0.45;
 // mascot-flank-tray: shrunk from 1.5 (tuned for 3x-scale mascots) now that
 // MASCOT_SCALE_MULTIPLIER is back down near its original size -- a smaller
 // figure needs a proportionally smaller gap to its own pet to still read as
@@ -408,7 +430,11 @@ export function createThreeScene(container) {
   // 3x-scaled mascots) to roughly match the much smaller MASCOT_SCALE_MULTIPLIER
   // now in use -- a light aimed at the old height would sit well above these
   // mascots' actual heads.
-  const mascotLightY = BOARD_BOTTOM_EDGE + 1.0;
+  // mascot-tray-flank-fix: mascots themselves dropped by MASCOT_Y_DROP (see
+  // that constant's comment) to stand beside the tray instead of right at
+  // the board's bottom edge -- the light needs to follow them down by the
+  // same amount so it still aims at their new head height, not the old one.
+  const mascotLightY = BOARD_BOTTOM_EDGE - MASCOT_Y_DROP + 1.0;
   const mascotLightRange = MASCOT_SIDE_MARGIN_WORLD * 2.8;
   const mascotLeftLight = new THREE.PointLight(0xfff3e0, 16, mascotLightRange, 1.7);
   mascotLeftLight.position.set(-MASCOT_CLUSTER_CENTER_X, mascotLightY, MASCOT_STAND_Z + 2.6);
@@ -863,7 +889,9 @@ export function createThreeScene(container) {
         const scaledBox = new THREE.Box3().setFromObject(root);
         const feetY = scaledBox.min.y;
         const centerZOffset = (scaledBox.max.z + scaledBox.min.z) / 2;
-        root.position.set(cfg.x, BOARD_BOTTOM_EDGE - feetY, MASCOT_STAND_Z - centerZOffset);
+        // mascot-tray-flank-fix: feet planted MASCOT_Y_DROP below the board's
+        // own bottom edge (not exactly on it) -- see that constant's comment.
+        root.position.set(cfg.x, BOARD_BOTTOM_EDGE - MASCOT_Y_DROP - feetY, MASCOT_STAND_Z - centerZOffset);
         root.traverse((obj) => {
           if (obj.isMesh) {
             // mascot-side-placement: shadow-casting OFF (was on) -- now that

@@ -168,6 +168,25 @@ function renderTrayQueueOverlay(state) {
 let threeDrag = null; // { trayIndex, piece, slotEl, anchor, valid }
 let floatingPieceEl = null;
 
+// drag-preview-guide-follows-finger fix (2026-07-29): computes the same
+// lifted visual center used to POSITION the floating piece DOM element (see
+// updateFloatingPiece below), so callers that need to know where the piece
+// visually IS (not where the raw finger/pointer is) can raycast/anchor
+// against that point instead. Bug: updateDragPreview() below used to feed
+// updateDragPreview's raycast the raw clientX/clientY -- the finger's own
+// position -- while updateFloatingPiece lifted the rendered piece well above
+// that. On mobile this meant the 3D placement guide tracked the player's
+// thumb while the piece they could actually see floated above it, so the
+// guide and the piece disagreed about where the piece would land.
+function liftedDragCenter(clientX, clientY, piece, cellPx) {
+  const ext = shapeExtent(piece.shape);
+  const boxH = ext.rows * cellPx;
+  const GUIDE_CLEARANCE_GAP = 18;
+  const MAX_LIFT_PX = 90;
+  const lift = Math.min(boxH, MAX_LIFT_PX) + GUIDE_CLEARANCE_GAP;
+  return { x: clientX, y: clientY - lift };
+}
+
 function updateFloatingPiece(clientX, clientY, piece, cellPx) {
   if (!floatingPieceEl) {
     floatingPieceEl = document.createElement('div');
@@ -231,12 +250,13 @@ function updateFloatingPiece(clientX, clientY, piece, cellPx) {
   // cell sizes, which is why the floating piece is also given a lower
   // opacity (0.75, down from the base 0.92 default) while dragging, so the
   // guide is still visible through any partial overlap.
-  const GUIDE_CLEARANCE_GAP = 18;
-  const MAX_LIFT_PX = 90; // keeps the floating piece visibly close to the pointer/grid even at large cell sizes
-  const lift = Math.min(boxH, MAX_LIFT_PX) + GUIDE_CLEARANCE_GAP;
+  // Shared with liftedDragCenter() above so the placement guide (raycast
+  // against the same lifted point) and this floating piece's visual position
+  // never drift apart -- see liftedDragCenter's comment for the bug this fixes.
+  const center = liftedDragCenter(clientX, clientY, piece, cellPx);
   floatingPieceEl.style.opacity = '0.75';
   floatingPieceEl.style.left = (clientX - boxW / 2) + 'px';
-  floatingPieceEl.style.top = Math.max(4, clientY - boxH / 2 - lift) + 'px';
+  floatingPieceEl.style.top = Math.max(4, center.y - boxH / 2) + 'px';
 }
 
 function removeFloatingPiece() {
@@ -275,6 +295,10 @@ if (THREE_PREVIEW) {
     }
 
     const handle = createThreeScene(wrap);
+    // shard-queue-overlap-fix: the canvas needs to be independently
+    // repositionable (pushed down within wrap) from resizeToViewport below,
+    // so grab the actual element createThreeScene just appended into wrap.
+    const canvasEl = handle.renderer.domElement;
 
     const mainEl = document.getElementById('main');
 
@@ -331,49 +355,66 @@ if (THREE_PREVIEW) {
 
     function resizeToViewport() {
       const { width, height } = currentSize();
-      // #three-stage-wrap (the Three.js canvas' own container) always stays
-      // a full SQUARE -- the camera's world-space framing in threeScene.js
-      // is derived 1:1 from a square aspect ratio, so resizing this box to
-      // anything else would distort or crop the rendered board.
-      wrap.style.width = width + 'px';
-      wrap.style.height = height + 'px';
+      // The Three.js CANVAS itself (handle.resize below) always stays a full
+      // SQUARE -- the camera's world-space framing in threeScene.js is
+      // derived 1:1 from a square aspect ratio, so rendering it at any other
+      // aspect would distort or crop the board. #three-stage-wrap (the DOM
+      // container the canvas + overlay rows both live in) does NOT have to
+      // stay that same square height, though -- see shard-queue-overlap-fix
+      // below, which can grow it taller than the canvas.
       handle.resize(width, height);
+
+      // shard-queue-overlap-fix (2026-07-29): queue-clip-fix (rev2, see the
+      // comment this replaces) clamped the queue row's top to 0 and accepted
+      // the overlap as a "worst case" -- but that worst case is actually the
+      // COMMON case at mobile widths: the row's real height is mostly fixed
+      // CSS px (label line-height + slot px sizes), so it barely shrinks as
+      // the square stage shrinks, while BOARD_TOP_FRAC's margin shrinks
+      // linearly with it. Confirmed via a real 390x844 mobile viewport
+      // (Playwright): queue row bottom edge landed ~19px inside the board's
+      // rendered top edge.
+      //
+      // Fix: when the row is taller than the margin BOARD_TOP_FRAC reserves
+      // for it, push the CANVAS (not the whole wrap) down within wrap by the
+      // deficit, and grow wrap taller by that same amount so nothing gets
+      // clipped. The queue row itself keeps its existing `top` formula
+      // (still relative to wrap, clamped at 0) -- it no longer needs to move,
+      // because the board it was overlapping moves down to clear it instead.
+      // canvasEl is positioned absolute (not static/in-flow) specifically so
+      // it CAN be pushed down independently of wrap's own top edge.
+      const gapPx = 10;
+      const boardTopPx = Math.round(BOARD_TOP_FRAC * height);
+      let queueRowHeight = 0;
       if (queueRowEl) {
-        // queue-clip-fix (rev2): the previous approach anchored via CSS
-        // `bottom`, computed purely from BOARD_TOP_FRAC*height -- a FRACTION
-        // of the canvas height. But the row's real rendered height is mostly
-        // fixed CSS px (label line-height + slot px sizes/max-width caps),
-        // not proportional to canvas height -- so at small viewports (narrow
-        // mobile widths, where this square canvas is much shorter than on
-        // desktop) that fractional margin shrinks well below the row's real
-        // px height, pushing its top edge above y=0 and invisibly cropping
-        // slots against #stage-wrap's overflow:hidden. Same fix as the tray
-        // row already uses below: measure the row's REAL offsetHeight and
-        // position with `top` (not `bottom`) using that real number, clamped
-        // to never go negative -- worst case (row taller than the available
-        // margin) it slightly overlaps the board's own top edge, which is
-        // visible/obvious and easy to re-tune, instead of silently losing
-        // slots off the top of the box.
-        const gapPx = 10;
-        const boardTopPx = Math.round(BOARD_TOP_FRAC * height);
         queueRowEl.style.position = 'absolute';
         queueRowEl.style.left = '4%';
         queueRowEl.style.right = '4%';
         queueRowEl.style.bottom = 'auto';
-        const rowHeight = queueRowEl.offsetHeight || 0;
-        const topPx = Math.max(0, boardTopPx - gapPx - rowHeight);
-        queueRowEl.style.top = Math.round(topPx) + 'px';
+        queueRowHeight = queueRowEl.offsetHeight || 0;
       }
-      let trayBottomPx = height; // fallback: no tray row measured yet
+      const idealTopPx = boardTopPx - gapPx - queueRowHeight;
+      const canvasTopOffsetPx = Math.max(0, -idealTopPx); // how far the board must drop to clear the queue row
+      if (queueRowEl) queueRowEl.style.top = Math.round(Math.max(0, idealTopPx)) + 'px';
+
+      canvasEl.style.position = 'absolute';
+      canvasEl.style.left = '0';
+      canvasEl.style.top = Math.round(canvasTopOffsetPx) + 'px';
+
+      wrap.style.width = width + 'px';
+      wrap.style.height = Math.round(height + canvasTopOffsetPx) + 'px';
+
+      let trayBottomPx = canvasTopOffsetPx + height; // fallback: no tray row measured yet
       if (trayRowEl) {
         // Small fixed breathing-room gap (px, not world units -- this is a
         // DOM/CSS overlay concern) below the board's bottom edge, same
-        // spirit as the queue row's own small top gap.
-        const gapPx = 10;
+        // spirit as the queue row's own small top gap. Offset by
+        // canvasTopOffsetPx too, same reasoning as the canvas itself, since
+        // this row's `top` is measured from the board's real (now possibly
+        // shifted-down) rendered position, not from wrap's own top edge.
         trayRowEl.style.position = 'absolute';
         trayRowEl.style.left = '4%';
         trayRowEl.style.right = '4%';
-        const trayTopPx = Math.round(BOARD_BOTTOM_FRAC * height + gapPx);
+        const trayTopPx = Math.round(canvasTopOffsetPx + BOARD_BOTTOM_FRAC * height + gapPx);
         trayRowEl.style.top = trayTopPx + 'px';
         // dead-space-below-tray fix (block-blast-hud-pass): the square
         // canvas box is taller than what the tray row actually uses -- the
@@ -387,11 +428,13 @@ if (THREE_PREVIEW) {
       }
       // #stage-wrap's own flow box is clipped to the tray's bottom edge (see
       // #stage-wrap's overflow:hidden in index.html) instead of the full
-      // square -- #three-stage-wrap above stays square-sized and simply gets
-      // clipped by this shorter box, so the board/camera math is untouched.
+      // wrap height -- #three-stage-wrap above stays sized to fit the canvas
+      // (now possibly taller than `height` per canvasTopOffsetPx above) and
+      // simply gets clipped by this shorter box, so the board/camera math is
+      // untouched.
       if (stageWrapEl) {
         stageWrapEl.style.width = width + 'px';
-        stageWrapEl.style.height = Math.round(Math.min(trayBottomPx, height)) + 'px';
+        stageWrapEl.style.height = Math.round(Math.min(trayBottomPx, canvasTopOffsetPx + height)) + 'px';
       }
     }
     resizeToViewport();
@@ -446,7 +489,12 @@ if (THREE_PREVIEW) {
 
     function updateDragPreview(clientX, clientY) {
       if (!threeDrag) return;
-      const world = handle.pointerToBoardXY(clientX, clientY);
+      // Raycast against the SAME lifted point the floating piece is actually
+      // drawn at (liftedDragCenter), not the raw finger/pointer position --
+      // see liftedDragCenter's comment above. Without this the guide tracked
+      // the thumb while the visible piece floated above it.
+      const center = liftedDragCenter(clientX, clientY, threeDrag.piece, handle.getCellSizePx());
+      const world = handle.pointerToBoardXY(center.x, center.y);
       if (!world) {
         threeDrag.anchor = null;
         handle.clearPlacementPreview();
