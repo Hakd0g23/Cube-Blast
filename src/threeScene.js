@@ -101,13 +101,19 @@ const BACKDROP_DEPTH = BOARD_SIZE * 0.75; // how far behind the board plane the 
 // values change materially, re-check this framing against a fresh
 // screenshot rather than assuming it still holds.
 const BOARD_WORLD_HALF_HEIGHT = BOARD_HALF + CUBE_FOOTPRINT / 2; // board's own top/bottom (and, since square, left/right) edge distance from center
-// tightened 2026-07-29 per user screenshot feedback: 0.14 read as too much
-// dead air between the DOM shard-queue row and the board's top edge now that
-// BOARD_FRAC=0.48 and the mascots sit beside (not below) the board -- 0.07
-// still clears the queue row's rendered height with some breathing room, just
-// not a near-empty band. Re-check against a fresh screenshot if the queue
-// row's own CSS height changes.
-const TOP_UI_MARGIN_FRAC = 0.07;
+// re-loosened (block-blast-hud-pass, queue-clip-fix): 0.07 (tightened
+// 2026-07-29 for the "too much dead air" complaint) turned out to be
+// SMALLER than the queue row's real rendered height (label line + a full
+// row of 4 slots, ~65-70px at typical viewport sizes) once threeBootstrap.js
+// switched the queue row to bottom-anchored absolute positioning -- a
+// too-small margin meant the row's own top edge landed above y=0 inside
+// #three-stage-wrap, and #stage-wrap's overflow:hidden (added for the
+// tray-bottom-clip fix) silently cropped that overflowing top portion, so
+// only part of the queue slots ever painted. 0.115 leaves real headroom
+// above the queue row's measured worst-case height instead of just visually
+// "looking about right" -- re-check against a fresh screenshot/measurement
+// if the queue row's own CSS (slot size, gap, label) changes again.
+const TOP_UI_MARGIN_FRAC = 0.115;
 const BOARD_FRAC = 0.48;
 const TOTAL_WORLD_HEIGHT = (2 * BOARD_WORLD_HALF_HEIGHT) / BOARD_FRAC;
 const FRUSTUM_TOP_WORLD = BOARD_WORLD_HALF_HEIGHT + TOP_UI_MARGIN_FRAC * TOTAL_WORLD_HEIGHT;
@@ -122,6 +128,17 @@ const FRUSTUM_TOP_WORLD = BOARD_WORLD_HALF_HEIGHT + TOP_UI_MARGIN_FRAC * TOTAL_W
 // here so threeBootstrap.js can position the tray row from actual world
 // geometry instead of guessing from CSS flex alone.
 export const BOARD_BOTTOM_FRAC = BOARD_FRAC + TOP_UI_MARGIN_FRAC;
+// queue-gap-fix: same reasoning as BOARD_BOTTOM_FRAC above, but for the
+// board's TOP edge -- the DOM #three-queue-row was only ever placed via CSS
+// flex `justify-content: space-between` inside #three-ui-overlay (i.e. "top
+// of the overlay's padding box"), with no relation to where the board's own
+// top edge actually renders. TOP_UI_MARGIN_FRAC was tuned by eye against a
+// specific queue-row height; once the row's real rendered height (label +
+// slots) exceeds that margin, it visually overlaps the board's top edge.
+// Exporting the fraction here lets threeBootstrap.js clamp the queue row's
+// height/position against the board's real top edge the same way it already
+// does for the tray row's bottom edge.
+export const BOARD_TOP_FRAC = TOP_UI_MARGIN_FRAC;
 const FRUSTUM_BOTTOM_WORLD = FRUSTUM_TOP_WORLD - TOTAL_WORLD_HEIGHT;
 // Per-side horizontal room outside the board's own footprint (aspect=1
 // container, so the same TOTAL_WORLD_HEIGHT applies horizontally too, per
@@ -850,7 +867,7 @@ export function createThreeScene(container) {
           }
         });
         scene.add(root);
-        const entry = { name: cfg.url.split('/').pop().replace('.gltf', ''), root, clips: [], actions: {}, activeAction: null, activeActionName: null, mixer: null, baseScale: scale, bouncePop: null };
+        const entry = { name: cfg.url.split('/').pop().replace('.gltf', ''), root, clips: [], actions: {}, activeAction: null, activeActionName: null, mixer: null, baseScale: scale, bouncePop: null, baseYaw: root.rotation.y };
         const clips = gltf.animations || [];
         entry.clips = clips;
         if (clips.length) {
@@ -997,6 +1014,130 @@ export function createThreeScene(container) {
       entry.root.scale.setScalar(entry.baseScale * (1 + bump));
     }
   }
+
+  // ---- pet-wander (block-blast-hud-pass, revision: replaces the earlier
+  // stationary "pet-idle-flavor" pass entirely -- Dog/Cat now actually roam
+  // around their own side of the scene using their real Walk/Run/Idle_Eating
+  // clips instead of standing frozen in one spot playing idle-in-place
+  // flavor). Independent of the human mascots and of each other -- no
+  // look-at/reacting-to-anyone behavior here, just believable ambient
+  // roaming, same "decorative, not wired to gameplay" scope as the rest of
+  // this module's mascot placement.
+  //
+  // Each pet's wander area is bounded to its OWN side's "yard" -- between the
+  // board's outer edge and a bit short of the frustum's own edge, and within
+  // a modest Z range around MASCOT_STAND_Z -- so it never wanders across the
+  // board, off past the visible play area, or into/behind the backdrop.
+  // Pairing (which human owns which pet, for the petting interaction below)
+  // is resolved by NAME once mascotsLoaded settles, same reasoning as the
+  // reverted greeting pass: mascots.push() happens independently inside each
+  // glTF's own .then(), so array order isn't guaranteed to match MASCOTS'
+  // declaration order.
+  const PET_WANDER_SPEED = 1.6; // world units/sec -- roughly a brisk walk for a ~1.4-unit-tall dog
+  const PET_WANDER_ARRIVE_EPS = 0.12;
+  const PET_PAUSE_MIN_MS = 2500;
+  const PET_PAUSE_MAX_MS = 5500;
+  const PET_EAT_CHANCE = 0.4; // odds a pause plays Idle_Eating flavor instead of a plain Idle hold
+  const YARD_Z_MIN = MASCOT_STAND_Z - 1.0;
+  const YARD_Z_MAX = MASCOT_STAND_Z + 1.6;
+  const YARD_INNER_X = BOARD_WORLD_HALF_HEIGHT + 0.3; // never cross this close to the board
+  const YARD_OUTER_MARGIN = MASCOT_SIDE_MARGIN_WORLD * 0.35; // stay a bit short of the frustum's own edge
+  let ownerPets = []; // [{ owner, pet }] once resolved
+  mascotsLoaded.then((entries) => {
+    const byName = Object.fromEntries(entries.map((e) => [e.name, e]));
+    ownerPets = [
+      { owner: byName.Character_Male_1, pet: byName.Dog, side: -1 },
+      { owner: byName.Character_Female_1, pet: byName.Cat, side: 1 },
+    ].filter((p) => p.owner && p.pet);
+    for (const { pet, side } of ownerPets) {
+      const outerX = MASCOT_CLUSTER_CENTER_X + YARD_OUTER_MARGIN;
+      pet.yard = side < 0 ? { xMin: -outerX, xMax: -YARD_INNER_X } : { xMin: YARD_INNER_X, xMax: outerX };
+      pet.wanderState = 'paused'; // 'paused' | 'walking' | 'interacting'
+      pet.wanderTarget = null;
+      pet.nextWanderAt = vnow() + 1000 + Math.random() * 3000; // short initial delay so pets don't all take off the instant they load
+      pet.pettingCooldownUntil = 0;
+      pet.interactingUntil = 0;
+    }
+  });
+  function pickWanderTarget(pet) {
+    const yard = pet.yard;
+    return {
+      x: yard.xMin + Math.random() * (yard.xMax - yard.xMin),
+      z: YARD_Z_MIN + Math.random() * (YARD_Z_MAX - YARD_Z_MIN),
+    };
+  }
+  function updatePetWander(now, deltaSec) {
+    for (const { pet } of ownerPets) {
+      if (pet.wanderState === 'interacting') continue; // petting interaction below owns movement/animation during this window
+      if (pet.wanderState === 'paused') {
+        if (now < pet.nextWanderAt) continue;
+        pet.wanderTarget = pickWanderTarget(pet);
+        pet.wanderState = 'walking';
+        // Mostly Walk, occasionally Run, for a bit of pace variety.
+        fadeToAction(pet, Math.random() < 0.25 ? 'Run' : 'Walk', 0.25, false);
+        continue;
+      }
+      // walking
+      const dx = pet.wanderTarget.x - pet.root.position.x;
+      const dz = pet.wanderTarget.z - pet.root.position.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= PET_WANDER_ARRIVE_EPS || deltaSec <= 0) {
+        pet.wanderState = 'paused';
+        pet.nextWanderAt = now + PET_PAUSE_MIN_MS + Math.random() * (PET_PAUSE_MAX_MS - PET_PAUSE_MIN_MS);
+        if (Math.random() < PET_EAT_CHANCE) {
+          fadeToAction(pet, 'Idle_Eating', 0.3, true); // LoopOnce -- auto-fades back to Idle via the mixer 'finished' listener once it plays through
+        } else {
+          fadeToAction(pet, pet.idleClipName, 0.3, false);
+        }
+        continue;
+      }
+      // Forward vector at rotation.y=r is (sin r, 0, cos r) -- same
+      // convention confirmed during mascot-side-placement above -- so facing
+      // the direction of travel is atan2(dx, dz).
+      pet.root.rotation.y = Math.atan2(dx, dz);
+      const step = Math.min(dist, PET_WANDER_SPEED * deltaSec);
+      pet.root.position.x += (dx / dist) * step;
+      pet.root.position.z += (dz / dist) * step;
+    }
+  }
+
+  // ---- petting interaction (block-blast-hud-pass, revision: dropped the
+  // owner's 'Duck' clip entirely per user feedback -- it's a crouch pose and
+  // read as scared/skittish rather than affectionate petting. No replacement
+  // animation on the owner -- Character_Male_1.gltf/Character_Female_1.gltf
+  // don't ship a dedicated pet/interact clip (checked via animation-name
+  // inspection: Death/Duck/HitReact/Idle/Idle_Attack/Idle_Hold/Jump/
+  // Jump_Idle/Jump_Land/No/Punch/Run/Run_Attack/Run_Hold/Walk/Walk_Hold/
+  // Wave/Yes) and every other option reads wrong for this moment too
+  // (Wave/Yes are celebratory, Idle_Attack/Punch obviously wrong), so the
+  // owner is simply left in whatever they're already doing -- the pet
+  // stopping and settling into its own Idle pose next to its owner is the
+  // whole visible interaction cue now. Proximity trigger/cooldown logic is
+  // otherwise unchanged from the previous pass.
+  const PETTING_TRIGGER_DIST = 1.4;
+  const PETTING_HOLD_MS = 1700;
+  const PETTING_COOLDOWN_MS = 18000; // guards against re-triggering every frame while still in proximity
+  function updatePetting(now) {
+    for (const { owner, pet } of ownerPets) {
+      if (pet.wanderState === 'interacting') {
+        if (now >= pet.interactingUntil) {
+          pet.wanderState = 'paused';
+          pet.nextWanderAt = now + 800 + Math.random() * 1200; // brief beat before wandering off again
+          fadeToAction(pet, pet.idleClipName, 0.3, false);
+        }
+        continue;
+      }
+      if (now < pet.pettingCooldownUntil) continue;
+      const dx = pet.root.position.x - owner.root.position.x;
+      const dz = pet.root.position.z - owner.root.position.z;
+      if (Math.hypot(dx, dz) > PETTING_TRIGGER_DIST) continue;
+      pet.wanderState = 'interacting';
+      pet.interactingUntil = now + PETTING_HOLD_MS;
+      pet.pettingCooldownUntil = now + PETTING_COOLDOWN_MS;
+      fadeToAction(pet, pet.idleClipName, 0.25, false);
+    }
+  }
+
   function reactSingle(entry, big) {
     if (!entry || !entry.mixer) return;
     const pet = isPetMascot(entry);
@@ -1515,11 +1656,13 @@ export function createThreeScene(container) {
     if (lastMixerNow === null) lastMixerNow = now;
     const deltaMs = Math.max(0, now - lastMixerNow);
     lastMixerNow = now;
+    const deltaSec = deltaMs / 1000;
     if (deltaMs > 0 && mascotMixers.length) {
-      const deltaSec = deltaMs / 1000;
       for (const mixer of mascotMixers) mixer.update(deltaSec);
     }
     updateMascotBounce(now);
+    updatePetWander(now, deltaSec);
+    updatePetting(now);
     if (isDeathFreezeActive(now)) return; // GDD 12.8 freeze-frame: skip this render call entirely, same as main.js's draw()-skip
     // neon-blocks-pass: composer.render() (RenderPass+UnrealBloomPass+
     // OutputPass) replaces the old direct renderer.render(scene, camera).

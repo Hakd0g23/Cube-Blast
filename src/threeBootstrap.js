@@ -12,7 +12,7 @@
 // (src/main.js's canvas pointer handlers are harmless no-ops once #stage is
 // hidden via visibility:hidden, since a hidden canvas never receives pointer
 // events -- confirmed, not assumed, during this cutover's verification).
-import { createThreeScene, BOARD_BOTTOM_FRAC } from './threeScene.js';
+import { createThreeScene, BOARD_BOTTOM_FRAC, BOARD_TOP_FRAC } from './threeScene.js';
 import { QUEUE_CAP, canPlaceAt } from './core.js';
 import { FAMILY_BY_COLOR } from './blockTextureConfig.js';
 import { unlockAudio, startBgm } from './audio.js';
@@ -309,21 +309,53 @@ if (THREE_PREVIEW) {
     // threeScene.js uses for the board itself, so the tray row always sits
     // right under the rendered grid regardless of viewport size.
     const trayRowEl = document.getElementById('three-tray-row');
+    // queue-gap-fix (block-blast-hud-pass): #three-queue-row had the exact
+    // same class of bug the tray row had before tray-gap-fix -- it was only
+    // ever placed via CSS flex `justify-content: space-between` (i.e. "top of
+    // the overlay's padding box"), with no relation to the board's real top
+    // edge. Once the row's real rendered height (label + slots) grew past
+    // TOP_UI_MARGIN_FRAC's tuned margin, it started overlapping the board.
+    // Anchored from the BOTTOM (not top) below, so the row grows upward away
+    // from the board regardless of its own content height, instead of
+    // growing downward INTO the board the way a top-anchor would.
+    const queueRowEl = document.getElementById('three-queue-row');
 
     function resizeToViewport() {
       const { width, height } = currentSize();
+      // #three-stage-wrap (the Three.js canvas' own container) always stays
+      // a full SQUARE -- the camera's world-space framing in threeScene.js
+      // is derived 1:1 from a square aspect ratio, so resizing this box to
+      // anything else would distort or crop the rendered board.
       wrap.style.width = width + 'px';
       wrap.style.height = height + 'px';
-      // #stage-wrap's own box needs this too: with #stage now taken out of
-      // flow (see above) and #three-stage-wrap absolutely positioned inside
-      // it, nothing else in #stage-wrap contributes a height -- it would
-      // collapse to 0 and #main's later children (controlHint/legend) would
-      // jump up to sit right under the header instead of under the board.
-      if (stageWrapEl) {
-        stageWrapEl.style.width = width + 'px';
-        stageWrapEl.style.height = height + 'px';
-      }
       handle.resize(width, height);
+      if (queueRowEl) {
+        // queue-clip-fix (rev2): the previous approach anchored via CSS
+        // `bottom`, computed purely from BOARD_TOP_FRAC*height -- a FRACTION
+        // of the canvas height. But the row's real rendered height is mostly
+        // fixed CSS px (label line-height + slot px sizes/max-width caps),
+        // not proportional to canvas height -- so at small viewports (narrow
+        // mobile widths, where this square canvas is much shorter than on
+        // desktop) that fractional margin shrinks well below the row's real
+        // px height, pushing its top edge above y=0 and invisibly cropping
+        // slots against #stage-wrap's overflow:hidden. Same fix as the tray
+        // row already uses below: measure the row's REAL offsetHeight and
+        // position with `top` (not `bottom`) using that real number, clamped
+        // to never go negative -- worst case (row taller than the available
+        // margin) it slightly overlaps the board's own top edge, which is
+        // visible/obvious and easy to re-tune, instead of silently losing
+        // slots off the top of the box.
+        const gapPx = 10;
+        const boardTopPx = Math.round(BOARD_TOP_FRAC * height);
+        queueRowEl.style.position = 'absolute';
+        queueRowEl.style.left = '4%';
+        queueRowEl.style.right = '4%';
+        queueRowEl.style.bottom = 'auto';
+        const rowHeight = queueRowEl.offsetHeight || 0;
+        const topPx = Math.max(0, boardTopPx - gapPx - rowHeight);
+        queueRowEl.style.top = Math.round(topPx) + 'px';
+      }
+      let trayBottomPx = height; // fallback: no tray row measured yet
       if (trayRowEl) {
         // Small fixed breathing-room gap (px, not world units -- this is a
         // DOM/CSS overlay concern) below the board's bottom edge, same
@@ -332,7 +364,25 @@ if (THREE_PREVIEW) {
         trayRowEl.style.position = 'absolute';
         trayRowEl.style.left = '4%';
         trayRowEl.style.right = '4%';
-        trayRowEl.style.top = Math.round(BOARD_BOTTOM_FRAC * height + gapPx) + 'px';
+        const trayTopPx = Math.round(BOARD_BOTTOM_FRAC * height + gapPx);
+        trayRowEl.style.top = trayTopPx + 'px';
+        // dead-space-below-tray fix (block-blast-hud-pass): the square
+        // canvas box is taller than what the tray row actually uses -- the
+        // remaining square footprint below the tray used to show up as a
+        // large blank gap before the control-hint/legend text underneath.
+        // trayRowEl.offsetHeight is real (it's populated every frame by
+        // renderTrayQueueOverlay below), so measuring it gives the tray's
+        // true rendered bottom edge; a small closing gapPx below that
+        // becomes the new effective bottom of the whole game screen.
+        trayBottomPx = trayTopPx + trayRowEl.offsetHeight + gapPx;
+      }
+      // #stage-wrap's own flow box is clipped to the tray's bottom edge (see
+      // #stage-wrap's overflow:hidden in index.html) instead of the full
+      // square -- #three-stage-wrap above stays square-sized and simply gets
+      // clipped by this shorter box, so the board/camera math is untouched.
+      if (stageWrapEl) {
+        stageWrapEl.style.width = width + 'px';
+        stageWrapEl.style.height = Math.round(Math.min(trayBottomPx, height)) + 'px';
       }
     }
     resizeToViewport();
@@ -355,10 +405,26 @@ if (THREE_PREVIEW) {
       renderTrayQueueOverlay(state);
     }
 
+    // tray-bottom-clip-first-paint fix: resizeToViewport() above already ran
+    // once synchronously, before syncFromGameState ever populated real tray
+    // slot children -- #three-tray-slots was empty, so trayRowEl.offsetHeight
+    // measured only the label line, undersizing #stage-wrap for one frame.
+    // Re-measuring once real slots exist corrects that without re-running the
+    // resize on every frame (which would fight window resize timing / cost
+    // extra layout for no benefit once slots stop changing size).
+    let resizedAfterFirstSync = false;
     function loop() {
       syncFromGameState();
+      if (!resizedAfterFirstSync && traySlotsHaveContent()) {
+        resizedAfterFirstSync = true;
+        resizeToViewport();
+      }
       handle.render();
       requestAnimationFrame(loop);
+    }
+    function traySlotsHaveContent() {
+      const slots = document.getElementById('three-tray-slots');
+      return !!(slots && slots.children.length);
     }
     requestAnimationFrame(loop);
 

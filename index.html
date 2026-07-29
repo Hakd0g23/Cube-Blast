@@ -110,11 +110,44 @@
     display: flex; flex-direction: column; align-items: center;
     gap: 8px; max-width: 720px; flex: 1 1 480px;
   }
-  header { display: flex; justify-content: space-between; align-items: center; width: 100%; gap: 8px; }
-  h1 { font-size: 18px; margin: 0; font-weight: 600; color: var(--fg); }
-  h1 small { color: var(--muted); font-weight: 400; }
-  #scoreLine { font-size: 15px; color: var(--fg); }
-  #scoreLine b { color: var(--accent); }
+  /* neon-title-banner (block-blast-hud-pass, tube-pass revision): first pass
+     read as plain "glowing white text," not a neon SIGN -- a blown-out white
+     fill plus a huge multi-layer blur has no visible "tube," just bloom.
+     Real neon signage has (a) a saturated, fairly SATURATED tube color (not
+     white), (b) a crisp stroke/outline that reads as the glass tube itself,
+     and (c) a comparatively modest, moody outer glow -- not a wash that
+     nearly whites out the letterforms. Rebuilt on that model: cyan fill +
+     a tight dark -webkit-text-stroke "tube casing" outline, then a short
+     stack of small-radius shadows (the tube's own glow, tight) and only ONE
+     wider, dimmer pass (the soft bloom off the tube) instead of the previous
+     6-layer, up-to-40px-blur stack. */
+  #titleBanner {
+    width: 100%; text-align: center; margin: 0; padding: 4px 0 2px;
+    font-family: 'Bangers', cursive; font-size: 34px; letter-spacing: 2px;
+    line-height: 1.1; color: #baf6ff;
+    -webkit-text-stroke: 1.5px #0a2530; text-stroke: 1.5px #0a2530;
+    text-shadow:
+      0 0 2px #6cf7ff, 0 0 5px #2fd8ff,
+      0 0 10px rgba(111, 60, 220, 0.55),
+      0 0 18px rgba(255, 92, 240, 0.35);
+  }
+  :root[data-theme="light"] #titleBanner { color: #0f5c73; -webkit-text-stroke-color: #dffbff; }
+  header {
+    display: flex; justify-content: space-between; align-items: center;
+    width: 100%; gap: 8px; flex-wrap: wrap;
+  }
+  #headerButtons { display: flex; gap: 8px; align-items: center; }
+  /* stat-panel-side-move (block-blast-hud-pass): score/best/wave used to sit
+     inline next to the <h1> title in the header flex row; reference shows
+     them as a small stat box off to the side of the title banner instead.
+     Moved out of `header` into their own compact panel that sits alongside
+     the New Game/Quit/Settings/Theme buttons on the row below the banner. */
+  #statPanel {
+    background: var(--panel-bg); border: 1px solid var(--panel-border);
+    border-radius: 8px; padding: 4px 10px; font-size: 13px; color: var(--fg);
+    line-height: 1.5; text-align: right;
+  }
+  #statPanel b { color: var(--accent); }
   #waveLine { display: none; }
   #waveLine.show { display: inline; }
   button {
@@ -134,12 +167,31 @@
     gap: 10px; font-size: 13px; color: var(--fg);
   }
   #settingsPanel input[type="range"] { flex: 1 1 auto; max-width: 200px; accent-color: var(--accent); }
-  #stage-wrap { position: relative; touch-action: none; }
+  /* tray-bottom-clip (block-blast-hud-pass): #three-stage-wrap (the Three.js
+     canvas' actual container) still has to stay a full SQUARE internally --
+     the perspective camera in threeScene.js frames a square board via
+     TOTAL_WORLD_HEIGHT math tied 1:1 to a square aspect, so shrinking the
+     canvas itself to a non-square box would distort or crop the board render.
+     Instead #stage-wrap (the outer flow box) gets its OWN shorter height (set
+     in threeBootstrap.js's resizeToViewport(), stopping right at the tray
+     row's bottom edge) plus overflow:hidden, so the unused square footprint
+     below the tray is clipped from LAYOUT/paint without touching the square
+     canvas/camera math at all. */
+  #stage-wrap { position: relative; touch-action: none; overflow: hidden; }
   canvas { display: block; touch-action: none; background: var(--canvas-bg); border-radius: 8px; }
   #overlay {
     position: absolute; inset: 0; display: none; flex-direction: column;
     align-items: center; justify-content: center; gap: 12px;
     background: var(--overlay-bg); border-radius: 8px;
+    /* play-again-click-fix: #three-ui-overlay (index.html, further below)
+       sits at z-index:2 with its tray slots forced back to pointer-events:
+       auto (input-raycasting comment) so drag input still works during play.
+       #overlay had no z-index at all, so on Game Over the tray's
+       auto-pointer-events slots kept intercepting clicks meant for
+       #restartBtn underneath them, in the same stacking context, regardless
+       of DOM order. Explicit z-index above 2 makes Game Over paint (and
+       receive clicks) on top of the tray overlay again. */
+    z-index: 10;
   }
   #overlay.show { display: flex; animation: overlayFadeIn 180ms ease-out; }
   @keyframes overlayFadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -191,6 +243,13 @@
     z-index: 2;
   }
   .three-ui-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  /* tray-label-removal: user only asked to remove the plain "Tray" text, not
+     the shard-queue's own "Shard Queue (x/4)" label (which still carries
+     useful state info). display:none (not deleting the element) so
+     threeBootstrap.js's #three-tray-label lookups/debug hook
+     (window.__fractureDebug.trayOverlayLabel) still resolve normally --
+     nothing else in that code path changes, just visibility. */
+  #three-tray-label { display: none; }
   .three-slot-row { display: flex; gap: 6px; }
   #three-queue-row .three-slot-row { justify-content: flex-start; }
   #three-tray-row .three-slot-row { justify-content: center; }
@@ -265,13 +324,15 @@
 <body>
 <div id="app">
   <div id="main">
+    <h1 id="titleBanner">Cube Blast!</h1>
     <header>
-      <h1>Cube Blast</h1>
-      <div id="scoreLine">Score: <b id="scoreVal">0</b> &nbsp; Best: <b id="bestVal">0</b><span id="waveLine">&nbsp; &nbsp;Wave <b id="waveVal">1</b></span></div>
-      <button id="newGameBtn">New Game</button>
-      <button id="quitBtn">Quit</button>
-      <button id="settingsBtn" title="Settings" aria-label="Settings">⚙️</button>
-      <button id="themeToggleBtn" title="Toggle light/dark mode" aria-label="Toggle light/dark mode">🌙</button>
+      <div id="headerButtons">
+        <button id="newGameBtn">New Game</button>
+        <button id="quitBtn">Quit</button>
+        <button id="settingsBtn" title="Settings" aria-label="Settings">⚙️</button>
+        <button id="themeToggleBtn" title="Toggle light/dark mode" aria-label="Toggle light/dark mode">🌙</button>
+      </div>
+      <div id="statPanel">Score: <b id="scoreVal">0</b> &nbsp; Best: <b id="bestVal">0</b><br id="statLineBreak" /><span id="waveLine">Wave <b id="waveVal">1</b></span></div>
     </header>
 
     <div id="settingsPanel">
