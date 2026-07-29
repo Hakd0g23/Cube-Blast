@@ -181,11 +181,17 @@ let floatingPieceEl = null;
 function liftedDragCenter(clientX, clientY, piece, cellPx) {
   const ext = shapeExtent(piece.shape);
   const boxH = ext.rows * cellPx;
-  const GUIDE_CLEARANCE_GAP = 18;
+  const GUIDE_CLEARANCE_GAP = 34;
   const MAX_LIFT_PX = 90;
   const lift = Math.min(boxH, MAX_LIFT_PX) + GUIDE_CLEARANCE_GAP;
   return { x: clientX, y: clientY - lift };
 }
+
+// Visual-only shrink for the floating drag piece so it reads as smaller than
+// the full-size placement guide underneath -- doesn't touch cellPx/boxW/boxH
+// used for the guide raycast (liftedDragCenter), just the DOM element's own
+// rendered size.
+const FLOATING_PIECE_SCALE = 0.8;
 
 function updateFloatingPiece(clientX, clientY, piece, cellPx) {
   if (!floatingPieceEl) {
@@ -203,8 +209,8 @@ function updateFloatingPiece(clientX, clientY, piece, cellPx) {
   // it actually occupies on drop. cellPx comes from
   // handle.getCellSizePx() (threeScene.js), the board's real live on-screen
   // cell size, so the preview always matches the actual placement size.
-  const boxW = ext.cols * cellPx;
-  const boxH = ext.rows * cellPx;
+  const boxW = ext.cols * cellPx * FLOATING_PIECE_SCALE;
+  const boxH = ext.rows * cellPx * FLOATING_PIECE_SCALE;
   floatingPieceEl.style.width = `${boxW}px`;
   floatingPieceEl.style.height = `${boxH}px`;
   for (const [r, c] of piece.shape) {
@@ -247,14 +253,14 @@ function updateFloatingPiece(clientX, clientY, piece, cellPx) {
   // guide overlap, same as before), but oversized pieces/cell sizes no
   // longer drag the floating piece increasingly far from the cursor. A
   // capped lift can partially overlap the guide for large pieces at large
-  // cell sizes, which is why the floating piece is also given a lower
-  // opacity (0.75, down from the base 0.92 default) while dragging, so the
-  // guide is still visible through any partial overlap.
+  // cell sizes; the piece is also rendered smaller than actual footprint
+  // (FLOATING_PIECE_SCALE) and the clearance gap was widened so it visually
+  // clears the guide without needing translucency to stay legible.
   // Shared with liftedDragCenter() above so the placement guide (raycast
   // against the same lifted point) and this floating piece's visual position
   // never drift apart -- see liftedDragCenter's comment for the bug this fixes.
   const center = liftedDragCenter(clientX, clientY, piece, cellPx);
-  floatingPieceEl.style.opacity = '0.75';
+  floatingPieceEl.style.opacity = '1';
   floatingPieceEl.style.left = (clientX - boxW / 2) + 'px';
   floatingPieceEl.style.top = Math.max(4, center.y - boxH / 2) + 'px';
 }

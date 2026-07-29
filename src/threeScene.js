@@ -417,7 +417,7 @@ export function createThreeScene(container) {
   }
   applyBackdropForCurrentTheme();
   backdropMat.color.set(0xffffff); // let the gradient texture supply color; a tint would otherwise darken it
-  const backdropThemeObserver = new MutationObserver(() => applyBackdropForCurrentTheme());
+  const backdropThemeObserver = new MutationObserver(() => applyThemeToScene());
   backdropThemeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   // No network fetch anymore -- built synchronously above, so this always
   // resolves true immediately. Kept as a Promise (not a plain boolean) so
@@ -561,14 +561,33 @@ export function createThreeScene(container) {
   // (cube.visible = false), which erased the 8x8 grid structure entirely
   // whenever a cell was unoccupied -- against the dark brick backdrop there
   // was nothing to read as "a board" at all. The reference image always
-  // shows a dim placeholder tile per empty cell. Reuse the same dark tone
-  // the 2D renderer's CSS custom property --empty-cell already uses
-  // (index.html: #2a2d36 dark theme baseline) so the empty-slot look stays
-  // visually consistent with the 2D renderer instead of inventing a new
-  // color. Slightly lower roughness/higher metalness than placeholderMat so
-  // it still catches a faint highlight from the key light and reads as a
+  // shows a dim placeholder tile per empty cell. Reuse the same tone the 2D
+  // renderer's CSS custom property --empty-cell already uses (index.html:
+  // #2a2d36 dark / #dfe2e8 light) so the empty-slot look stays visually
+  // consistent with the 2D renderer instead of inventing a new color.
+  // Slightly lower roughness/higher metalness than placeholderMat so it
+  // still catches a faint highlight from the key light and reads as a
   // recessed "socket," not just a flat gray square.
-  const emptyCellMat = new THREE.MeshStandardMaterial({ color: 0x2a2d36, roughness: 0.9, metalness: 0.1 });
+  //
+  // light-mode-board-fix (2026-07-29): this used to be a single hardcoded
+  // dark hex, so every empty cell (the entire board, first paint) stayed
+  // dark charcoal even under the light theme -- only the backdrop behind it
+  // reacted to currentTheme()/the [data-theme] MutationObserver above, so
+  // the board itself looked broken/dark against a light page. Empty cells
+  // are the shared default material of every cube until it's occupied, so
+  // retinting emptyCellMat.color in place (like backdropMat's texture swap)
+  // repaints the whole empty board with no per-cube work needed.
+  const EMPTY_CELL_COLORS = { dark: 0x2a2d36, light: 0xdfe2e8 };
+  const emptyCellMat = new THREE.MeshStandardMaterial({ color: EMPTY_CELL_COLORS.dark, roughness: 0.9, metalness: 0.1 });
+  // Single hub for everything the [data-theme] MutationObserver above needs
+  // to re-run on toggle -- backdrop gradient plus this shared empty-cell
+  // material. Hoisted (function declaration) so the observer set up before
+  // emptyCellMat existed can still reference it.
+  function applyThemeToScene() {
+    applyBackdropForCurrentTheme();
+    emptyCellMat.color.set(EMPTY_CELL_COLORS[currentTheme()]);
+  }
+  applyThemeToScene();
   // juice-effects-port: all 64 cube meshes live under one Group so the zoom
   // pulse (GDD 12.4, board scales 1.0->1.03->1.0) and the death-sequence
   // shake (GDD 12.8, 6px/300ms-decay) can be applied as a single group
