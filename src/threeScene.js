@@ -579,13 +579,56 @@ export function createThreeScene(container) {
   // repaints the whole empty board with no per-cube work needed.
   const EMPTY_CELL_COLORS = { dark: 0x2a2d36, light: 0xdfe2e8 };
   const emptyCellMat = new THREE.MeshStandardMaterial({ color: EMPTY_CELL_COLORS.dark, roughness: 0.9, metalness: 0.1 });
+
+  // board-backing-panel (2026-07-29): the gutter between cubes used to show
+  // the far backdrop wall through it (BACKDROP_DEPTH away, blurred by the
+  // gradient's own softness), which happened to read as a passable grid
+  // line only because the dark-theme backdrop's darkest stop was close to
+  // black -- a big contrast jump against emptyCellMat. In light mode the
+  // backdrop's lightest stops sit close in lightness to the light empty-
+  // cell color, so the same gutter gap read as almost no line at all
+  // ("grid barely visible" feedback). A dedicated panel sitting just behind
+  // the cubes (not far away at the backdrop) gives the gutter a real,
+  // theme-matched line color to show -- reusing index.html's own
+  // --grid-line values (#1b1d23 dark / #c3c7d1 light) so the 3D grid reads
+  // exactly as crisp as the 2D renderer's grid stroke did.
+  const GRID_LINE_COLORS = { dark: 0x1b1d23, light: 0xc3c7d1 };
+  const boardBackingGeo = new THREE.PlaneGeometry(
+    BOARD_SIZE * CELL_STRIDE + GUTTER_WORLD,
+    BOARD_SIZE * CELL_STRIDE + GUTTER_WORLD
+  );
+  const boardBackingMat = new THREE.MeshBasicMaterial({ color: GRID_LINE_COLORS.dark });
+  const boardBacking = new THREE.Mesh(boardBackingGeo, boardBackingMat);
+  boardBacking.position.z = -0.08; // just behind the cubes' front face, well in front of the far backdrop
+  scene.add(boardBacking);
+
+  // Side particles read as a soft glow via additive blending against a dark
+  // backdrop, but additive blending only ADDS light -- against a light
+  // backdrop that reads as a barely-there pastel smudge instead of a
+  // defined dot ("particles look low quality" feedback). Normal blending
+  // with a solid-ish opacity keeps the dot's actual hue visible on a light
+  // background instead of relying on brightening an already-bright canvas.
+  const SIDE_PARTICLE_STYLE = {
+    dark: { blending: THREE.AdditiveBlending, opacity: 0.4 },
+    light: { blending: THREE.NormalBlending, opacity: 0.75 },
+  };
+
   // Single hub for everything the [data-theme] MutationObserver above needs
-  // to re-run on toggle -- backdrop gradient plus this shared empty-cell
-  // material. Hoisted (function declaration) so the observer set up before
-  // emptyCellMat existed can still reference it.
+  // to re-run on toggle -- backdrop gradient, empty-cell material, grid
+  // line backing, and particle styling. Hoisted (function declaration) so
+  // the observer set up before these materials existed can still reference
+  // it.
   function applyThemeToScene() {
+    const theme = currentTheme();
     applyBackdropForCurrentTheme();
-    emptyCellMat.color.set(EMPTY_CELL_COLORS[currentTheme()]);
+    emptyCellMat.color.set(EMPTY_CELL_COLORS[theme]);
+    boardBackingMat.color.set(GRID_LINE_COLORS[theme]);
+    const style = SIDE_PARTICLE_STYLE[theme];
+    if (style && typeof sideParticleMat !== 'undefined') {
+      sideParticleMat.blending = style.blending;
+      sideParticleMat.opacity = style.opacity;
+      sideParticleMat.needsUpdate = true;
+    }
   }
   applyThemeToScene();
   // juice-effects-port: all 64 cube meshes live under one Group so the zoom
@@ -1225,6 +1268,9 @@ export function createThreeScene(container) {
     cubeGeo.dispose();
     placeholderMat.dispose();
     emptyCellMat.dispose();
+    scene.remove(boardBacking);
+    boardBackingGeo.dispose();
+    boardBackingMat.dispose();
     familyMaterials.forEach(({ mat }) => {
       if (mat.map) mat.map.dispose();
       mat.dispose();
