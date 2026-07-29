@@ -111,6 +111,17 @@ const TOP_UI_MARGIN_FRAC = 0.07;
 const BOARD_FRAC = 0.48;
 const TOTAL_WORLD_HEIGHT = (2 * BOARD_WORLD_HALF_HEIGHT) / BOARD_FRAC;
 const FRUSTUM_TOP_WORLD = BOARD_WORLD_HALF_HEIGHT + TOP_UI_MARGIN_FRAC * TOTAL_WORLD_HEIGHT;
+// tray-gap-fix (2026-07-29): the DOM #three-tray-row used to be pinned to
+// the very bottom of #three-stage-wrap via CSS `justify-content:
+// space-between` on its flex parent, with NO relation to where the board's
+// bottom edge actually lands on screen. Since BOARD_FRAC+TOP_UI_MARGIN_FRAC
+// only add up to 0.55 of the total square, the remaining 0.45 all became
+// dead space between the rendered board and the tray row -- confirmed via
+// a live screenshot measurement (board bottom sat at ~55% down the square,
+// tray row started at ~87%). Exporting the board's own bottom-edge fraction
+// here so threeBootstrap.js can position the tray row from actual world
+// geometry instead of guessing from CSS flex alone.
+export const BOARD_BOTTOM_FRAC = BOARD_FRAC + TOP_UI_MARGIN_FRAC;
 const FRUSTUM_BOTTOM_WORLD = FRUSTUM_TOP_WORLD - TOTAL_WORLD_HEIGHT;
 // Per-side horizontal room outside the board's own footprint (aspect=1
 // container, so the same TOTAL_WORLD_HEIGHT applies horizontally too, per
@@ -684,7 +695,15 @@ export function createThreeScene(container) {
         // X/Z footprint but leaves Y untouched, so foot height is still
         // correct either way -- the Z-centering isn't, which is exactly why
         // this ordering matters).
-        root.rotation.y = cfg.side < 0 ? Math.PI / 2 : -Math.PI / 2;
+        //
+        // mascot-face-camera (2026-07-29, per user screenshot feedback): a
+        // full 90-degree yaw put the mascots in strict profile -- faces
+        // never visible at all, just a silhouette. Backed off to 55 degrees
+        // (still turned mostly toward the board/grid, matching the "flanking
+        // a display case" framing above) so the face reads as a 3/4 view
+        // toward the camera instead of a pure side-on profile.
+        const MASCOT_YAW = Math.PI * (55 / 180);
+        root.rotation.y = cfg.side < 0 ? MASCOT_YAW : -MASCOT_YAW;
 
         // Re-measure after scaling+rotating to plant feet on the shared
         // floor level precisely (bounding box min.y is the model's lowest

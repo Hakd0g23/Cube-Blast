@@ -6,7 +6,7 @@
 import { createGame, placePiece, canPlaceAt, mulberry32, QUEUE_CAP, TRAY_BASE_SIZE, WAVE_MAX_TIER, waveCalloutText } from './core.js';
 import { BOARD_SIZE, COLORS } from './pieces.js';
 import { BLOCK_MAP_PATH, FAMILY_BY_COLOR } from './blockTextureConfig.js';
-import { playLineClear, playShardScatter, playGameOver, playComboVoice, playPerfectClearVoice, unlockAudio, setWaveTier, startBgm, setSfxVolume, getSfxVolume, setBgmVolume, getBgmVolume } from './audio.js';
+import { playLineClear, playShardScatter, playGameOver, playComboVoice, playPerfectClearVoice, playPlace, unlockAudio, setWaveTier, startBgm, setSfxVolume, getSfxVolume, setBgmVolume, getBgmVolume } from './audio.js';
 import { fetchTopScores, submitScore } from './leaderboard.js';
 
 const canvas = document.getElementById('stage');
@@ -1404,6 +1404,7 @@ function performPlacement(trayIndex, targetR, targetC) {
   const queueLenBefore = state.shardQueue.length;
   const res = placePiece(state, trayIndex, targetR, targetC);
   if (res.ok) {
+      playPlace(); // audio-placement-sfx: light "settle" tick for every landed piece, clear or not
       // GDD 12.1/12.2: drop-in + squash-and-settle for the just-landed cells.
       triggerLandingAnim(piece.shape, targetR, targetC);
       // Landing flash for the piece that just landed on the board -- do this

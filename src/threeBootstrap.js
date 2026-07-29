@@ -12,9 +12,10 @@
 // (src/main.js's canvas pointer handlers are harmless no-ops once #stage is
 // hidden via visibility:hidden, since a hidden canvas never receives pointer
 // events -- confirmed, not assumed, during this cutover's verification).
-import { createThreeScene } from './threeScene.js';
+import { createThreeScene, BOARD_BOTTOM_FRAC } from './threeScene.js';
 import { QUEUE_CAP, canPlaceAt } from './core.js';
 import { FAMILY_BY_COLOR } from './blockTextureConfig.js';
+import { unlockAudio, startBgm } from './audio.js';
 
 const LEGACY_2D = new URLSearchParams(location.search).has('legacy2d');
 const THREE_PREVIEW = !LEGACY_2D;
@@ -258,11 +259,32 @@ if (THREE_PREVIEW) {
       return { width: size, height: size };
     }
 
+    // tray-gap-fix (2026-07-29): #three-tray-row used to be pinned to the
+    // bottom of #three-stage-wrap purely via CSS flex `justify-content:
+    // space-between`, with no relation to where the 3D board's own bottom
+    // edge actually renders -- left a huge dead gap between the visible
+    // grid and the tray (BOARD_BOTTOM_FRAC is only ~0.55 of the square, so
+    // ~45% of the height was unclaimed empty space below the board). Now
+    // positioned in absolute px from the real world-space geometry
+    // threeScene.js uses for the board itself, so the tray row always sits
+    // right under the rendered grid regardless of viewport size.
+    const trayRowEl = document.getElementById('three-tray-row');
+
     function resizeToViewport() {
       const { width, height } = currentSize();
       wrap.style.width = width + 'px';
       wrap.style.height = height + 'px';
       handle.resize(width, height);
+      if (trayRowEl) {
+        // Small fixed breathing-room gap (px, not world units -- this is a
+        // DOM/CSS overlay concern) below the board's bottom edge, same
+        // spirit as the queue row's own small top gap.
+        const gapPx = 10;
+        trayRowEl.style.position = 'absolute';
+        trayRowEl.style.left = '4%';
+        trayRowEl.style.right = '4%';
+        trayRowEl.style.top = Math.round(BOARD_BOTTOM_FRAC * height + gapPx) + 'px';
+      }
     }
     resizeToViewport();
     window.addEventListener('resize', resizeToViewport);
@@ -354,6 +376,18 @@ if (THREE_PREVIEW) {
     // survives renderTrayQueueOverlay's per-frame innerHTML rebuild of its
     // children (see comment above traySlots' declaration).
     traySlots.addEventListener('pointerdown', (e) => {
+      // audio-unlock-3d-fix (2026-07-29): src/main.js's OWN unlockAudio()/
+      // startBgm() calls are wired to the LEGACY 2D #stage canvas's own
+      // pointerdown listener -- which never fires anymore now that Three.js
+      // is the default renderer and #stage sits `visibility:hidden` (hidden
+      // elements are excluded from hit-testing, so that listener is
+      // permanently dead in the shipped 3D mode). Nothing else ever created
+      // the AudioContext in this path, so EVERY sound (bgm, line-clear,
+      // shard, game-over) was silently silent site-wide. This tray-pickup
+      // pointerdown is the first real user gesture in the Three.js input
+      // path, mirroring exactly where the 2D canvas used to unlock audio.
+      unlockAudio();
+      startBgm();
       const slotEl = e.target.closest('.three-tray-slot');
       if (!slotEl || slotEl.classList.contains('dashed')) return;
       startDrag(e, slotEl);

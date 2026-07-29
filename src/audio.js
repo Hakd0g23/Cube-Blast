@@ -170,6 +170,20 @@ function playNoiseTick(freq, duration, gain, when = 0) {
 
 // ---- public effect API ------------------------------------------------------
 
+// Piece placement: a short, quiet glassy tick every time a piece lands on
+// the board (whether or not it clears a line) -- previously there was NO
+// sound at all for the single most frequent player action in the game
+// (every drag-drop was silent even with audio unlocked). Deliberately much
+// quieter/shorter than playLineClear so it reads as a light "settle" tap and
+// never competes with the clear/combo stingers that can follow immediately
+// after on the same placement.
+export function playPlace() {
+  playNoiseTick(1600, 0.05, 0.09);
+  playBell(920, 0.12, 0.07);
+}
+
+
+
 // Line clear: pitch rises with combo size (1..4+ lines) so bigger clears
 // read as more rewarding, capped so it never scrapes crazy-high with
 // extreme combos. `lineCount` from placePiece's additive return field.
