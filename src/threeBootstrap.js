@@ -202,13 +202,32 @@ function updateFloatingPiece(clientX, clientY, piece, cellPx) {
     }
     floatingPieceEl.appendChild(cell);
   }
-  // Centered on the pointer, lifted up a bit so touch input isn't hidden
-  // under the player's own finger -- same "lift above the touch point"
-  // intent as src/main.js's TOUCH_VISUAL_LIFT for the 2D drag, applied
-  // unconditionally here since this floating element is always separate
-  // from the pointer itself (mouse or touch alike).
+  // Centered on the pointer horizontally, lifted up vertically so touch
+  // input isn't hidden under the player's own finger -- same "lift above the
+  // touch point" intent as src/main.js's TOUCH_VISUAL_LIFT for the 2D drag,
+  // applied unconditionally here since this floating element is always
+  // separate from the pointer itself (mouse or touch alike).
+  //
+  // drag-preview-covers-guide fix (2026-07-29): the lift used to be a flat
+  // 46px regardless of the piece's own on-screen footprint (boxH), which
+  // this element (a DOM overlay pinned to z-index 9999, i.e. always painted
+  // above the WebGL canvas) squarely overlapped for any piece taller than
+  // ~92px -- common at desktop cell sizes, where the 3D placement-guide
+  // mesh (handle.setPlacementPreview, threeScene.js) sits directly under the
+  // SAME pointer position this floating piece is centered on. Lifting by the
+  // piece's own full height (plus a small gap) instead of a flat constant
+  // means the floating piece's bottom edge always clears above the guide's
+  // footprint, regardless of piece size, so the highlighted landing cells
+  // stay visible while dragging. Clamped to a small positive top so a drag
+  // that starts near the very top of the viewport doesn't push the piece
+  // off-screen. Uses the full boxH (not boxH/2) as the lift so the element
+  // ends up entirely above the pointer's Y position (plus the gap), rather
+  // than straddling it -- that's what guarantees it can never overlap a
+  // same-size guide footprint centered on that same pointer.
+  const GUIDE_CLEARANCE_GAP = 18;
+  const lift = boxH + GUIDE_CLEARANCE_GAP;
   floatingPieceEl.style.left = (clientX - boxW / 2) + 'px';
-  floatingPieceEl.style.top = (clientY - boxH / 2 - 46) + 'px';
+  floatingPieceEl.style.top = Math.max(4, clientY - boxH / 2 - lift) + 'px';
 }
 
 function removeFloatingPiece() {
@@ -221,9 +240,30 @@ function removeFloatingPiece() {
 if (THREE_PREVIEW) {
   const stage2D = document.getElementById('stage');
   const wrap = document.getElementById('three-stage-wrap');
+  const stageWrapEl = document.getElementById('stage-wrap');
   if (wrap) {
     wrap.style.display = 'block';
-    if (stage2D) stage2D.style.visibility = 'hidden';
+    if (stage2D) {
+      stage2D.style.visibility = 'hidden';
+      // dead-space-below-board fix (2026-07-29): #stage stayed in normal
+      // document flow even though it's invisible, so #stage-wrap's own
+      // height in #main's flex column was still whatever the legacy 2D
+      // computeLayout() formula (main.js) produced -- a DIFFERENT, taller
+      // number than the visible Three.js square below, since the two
+      // renderers use different vertical-overhead constants (280px vs 90px,
+      // see currentSize()'s comment above). That mismatch showed up as a
+      // large blank gap between the visible board/tray and the "How to
+      // play" panel underneath. Taking #stage out of flow (position:
+      // absolute, zero footprint) means #stage-wrap's flow height is driven
+      // only by the visible #three-stage-wrap sizing this module already
+      // sets below -- the legacy canvas still exists/still draws (so
+      // ?legacy2d=1 is unaffected, since LEGACY_2D short-circuits this
+      // whole block), it just no longer occupies layout space it isn't
+      // visually using.
+      stage2D.style.position = 'absolute';
+      stage2D.style.top = '0';
+      stage2D.style.left = '0';
+    }
 
     const handle = createThreeScene(wrap);
 
@@ -274,6 +314,15 @@ if (THREE_PREVIEW) {
       const { width, height } = currentSize();
       wrap.style.width = width + 'px';
       wrap.style.height = height + 'px';
+      // #stage-wrap's own box needs this too: with #stage now taken out of
+      // flow (see above) and #three-stage-wrap absolutely positioned inside
+      // it, nothing else in #stage-wrap contributes a height -- it would
+      // collapse to 0 and #main's later children (controlHint/legend) would
+      // jump up to sit right under the header instead of under the board.
+      if (stageWrapEl) {
+        stageWrapEl.style.width = width + 'px';
+        stageWrapEl.style.height = height + 'px';
+      }
       handle.resize(width, height);
       if (trayRowEl) {
         // Small fixed breathing-room gap (px, not world units -- this is a
@@ -454,8 +503,10 @@ if (THREE_PREVIEW) {
           // the cells themselves, not tied to the queue-arc mechanic below.
           handle.triggerBreakEffect(payload.rows, payload.cols, payload.color);
           // mascot-reactions: same "any real clear" gate: humanoids/pets
-          // react to a small clear, all four react bigger on a combo/bigClear.
-          handle.triggerMascotReact(payload.lineCount, payload.bigClear);
+          // react to a small clear, all four react bigger on a combo/bigClear,
+          // and comboStreak/wholeFieldClear escalate further into a bigger
+          // "bounce pop" tier (see mascot-celebration-tiers, threeScene.js).
+          handle.triggerMascotReact(payload.lineCount, payload.bigClear, payload.comboStreak, payload.wholeFieldClear);
         }
         if (payload.lineCount > 0 && payload.newlyQueued > 0) {
           // Force the DOM queue-slot overlay to reflect the just-committed
@@ -541,7 +592,7 @@ if (THREE_PREVIEW) {
       isBreakEffectActive: () => handle.isBreakEffectActive(),
       // mascot-reactions additions:
       mascotActiveClip: (name) => handle.mascotActiveClip(name),
-      triggerMascotReact: (lineCount, bigClear) => handle.triggerMascotReact(lineCount, bigClear),
+      triggerMascotReact: (lineCount, bigClear, comboStreak, wholeFieldClear) => handle.triggerMascotReact(lineCount, bigClear, comboStreak, wholeFieldClear),
     };
   }
 }

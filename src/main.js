@@ -1480,6 +1480,7 @@ function performPlacement(trayIndex, targetR, targetC) {
         cells: piece.shape, r0: targetR, c0: targetC, color: piece.color,
         lineCount: res.lineCount, rows: res.rows, cols: res.cols,
         queueLenBefore, newlyQueued, bigClear,
+        comboStreak: res.comboStreak, wholeFieldClear: res.wholeFieldClear,
       });
   }
   return res;

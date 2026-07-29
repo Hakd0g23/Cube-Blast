@@ -472,6 +472,126 @@ export function createThreeScene(container) {
   let backdropTextureFailed = false;
   const backdropTextureLoaded = Promise.resolve(true);
 
+  // ---- side-decor ambient particles (2026-07-29) -------------------------
+  // Per user screenshot feedback: the side margins beyond the mascot
+  // clusters (MASCOT_SIDE_MARGIN_WORLD's outer half, out to the frustum
+  // edge) read as bare/empty once the mascots themselves stopped filling
+  // that space. A drifting field of soft glowing motes -- reusing the SAME
+  // cyan/magenta neon palette the accentLeft/accentRight point lights above
+  // already established (0x33e6ff / 0xff3ec8), so this reads as "belongs to
+  // this scene's lighting", not a new color language -- fills that bare
+  // space without competing with gameplay: kept BEHIND the mascots/board
+  // (negative Z, between the board plane and the backdrop), low opacity,
+  // additive blending (glow, not solid clutter), and slow/subtle drift
+  // rather than anything fast enough to catch the eye mid-play.
+  //
+  // One shared THREE.Points cloud (not per-particle meshes) for the usual
+  // "don't reach for more machinery than the naive approach needs" reason
+  // this file already applies to the board cubes above (naive BoxGeometry
+  // per cell, no InstancedMesh) -- a few dozen points is nowhere near where
+  // per-mesh overhead would matter, and Points is the simplest correct tool
+  // for "a field of soft dots."
+  const SIDE_PARTICLE_COUNT_PER_SIDE = 22;
+  const SIDE_PARTICLE_COUNT = SIDE_PARTICLE_COUNT_PER_SIDE * 2;
+  // Soft round glow sprite (radial-gradient canvas texture), same offscreen-
+  // canvas technique as makeBackdropGradientTexture above -- avoids a hard
+  // square dot (THREE.Points' default) reading as a UI/debug artifact rather
+  // than ambient scenery.
+  function makeGlowDotTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.4, 'rgba(255,255,255,0.55)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 64, 64);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+  const sideParticleGeo = new THREE.BufferGeometry();
+  const sideParticlePositions = new Float32Array(SIDE_PARTICLE_COUNT * 3);
+  const sideParticleColors = new Float32Array(SIDE_PARTICLE_COUNT * 3);
+  // Per-particle animation state, kept in parallel plain arrays (not on the
+  // geometry) since only positions/colors are actual GPU attributes here --
+  // baseY/phase/speed/drift are CPU-side inputs to updateSideParticles().
+  const sideParticleBaseY = new Float32Array(SIDE_PARTICLE_COUNT);
+  const sideParticleBaseX = new Float32Array(SIDE_PARTICLE_COUNT);
+  const sideParticlePhase = new Float32Array(SIDE_PARTICLE_COUNT);
+  const sideParticleBobSpeed = new Float32Array(SIDE_PARTICLE_COUNT);
+  const sideParticleDriftAmp = new Float32Array(SIDE_PARTICLE_COUNT);
+  const cyanColor = new THREE.Color(0x33e6ff);
+  const magentaColor = new THREE.Color(0xff3ec8);
+  for (let i = 0; i < SIDE_PARTICLE_COUNT; i++) {
+    const side = i < SIDE_PARTICLE_COUNT_PER_SIDE ? -1 : 1;
+    // Spread across the FULL side margin (from just outside the board's own
+    // edge out to the frustum's outer edge) -- covers both the inner gap
+    // beside the board AND the outer gap beyond the mascot clusters, per the
+    // "bare space on both sides" report (not just the outermost strip).
+    const marginT = Math.random(); // 0 = just past the board edge, 1 = frustum edge
+    const x = side * (BOARD_WORLD_HALF_HEIGHT + 0.6 + marginT * (MASCOT_SIDE_MARGIN_WORLD - 0.6));
+    const y = FRUSTUM_BOTTOM_WORLD + Math.random() * TOTAL_WORLD_HEIGHT;
+    // Between the board plane and the backdrop -- reads as background
+    // atmosphere, never overlapping/occluding the board, mascots, or the
+    // placement-preview/juice-effect layers (all of which sit at z >= 0).
+    const z = -1.5 - Math.random() * (BACKDROP_DEPTH - 2);
+    sideParticleBaseX[i] = x;
+    sideParticleBaseY[i] = y;
+    sideParticlePositions[i * 3] = x;
+    sideParticlePositions[i * 3 + 1] = y;
+    sideParticlePositions[i * 3 + 2] = z;
+    const col = side < 0 ? cyanColor : magentaColor;
+    sideParticleColors[i * 3] = col.r;
+    sideParticleColors[i * 3 + 1] = col.g;
+    sideParticleColors[i * 3 + 2] = col.b;
+    sideParticlePhase[i] = Math.random() * Math.PI * 2;
+    // Slow, gentle bob (full cycle 6-11s) and a small horizontal drift
+    // amplitude (<=0.35 world units) -- deliberately subtle per the "don't
+    // distract from gameplay" brief, tuned by eye against a real screenshot.
+    sideParticleBobSpeed[i] = (2 * Math.PI) / (6000 + Math.random() * 5000);
+    sideParticleDriftAmp[i] = 0.15 + Math.random() * 0.2;
+  }
+  sideParticleGeo.setAttribute('position', new THREE.BufferAttribute(sideParticlePositions, 3));
+  sideParticleGeo.setAttribute('color', new THREE.BufferAttribute(sideParticleColors, 3));
+  const sideParticleTexture = makeGlowDotTexture();
+  // size-in-pixels-not-world-units fix (2026-07-29): this scene's camera is
+  // ORTHOGRAPHIC (see `const camera = new THREE.OrthographicCamera(...)`
+  // above) -- three.js's Points vertex shader only applies the
+  // sizeAttenuation distance-scale branch when the projection matrix is
+  // PERSPECTIVE (`isPerspectiveMatrix`); under orthographic projection
+  // `gl_PointSize` is always the material's raw `size` value directly, in
+  // screen PIXELS, regardless of the sizeAttenuation flag. The original
+  // 0.55 here was chosen as if it were a world-unit size (matching this
+  // file's board/mascot convention of everything else being in world
+  // units) -- that rendered as a sub-pixel, invisible point. Confirmed via a
+  // real windowed Playwright run: with size=0.55 nothing appeared on
+  // screen at all; bumping to a real pixel size (14) made the glow dots
+  // clearly visible without reading as clutter.
+  const sideParticleMat = new THREE.PointsMaterial({
+    size: 14,
+    map: sideParticleTexture,
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.4,
+    depthWrite: false, // additive-style glow shouldn't punch a hole in the backdrop behind it
+    blending: THREE.AdditiveBlending,
+    sizeAttenuation: false, // no-op under orthographic (see comment above) -- explicit for clarity
+  });
+  const sideParticles = new THREE.Points(sideParticleGeo, sideParticleMat);
+  scene.add(sideParticles);
+  function updateSideParticles(now) {
+    const posAttr = sideParticleGeo.attributes.position;
+    for (let i = 0; i < SIDE_PARTICLE_COUNT; i++) {
+      const t = now * sideParticleBobSpeed[i] + sideParticlePhase[i];
+      posAttr.array[i * 3] = sideParticleBaseX[i] + Math.sin(t * 0.6) * sideParticleDriftAmp[i];
+      posAttr.array[i * 3 + 1] = sideParticleBaseY[i] + Math.sin(t) * sideParticleDriftAmp[i] * 1.4;
+    }
+    posAttr.needsUpdate = true;
+  }
+
   // ---- 8x8 grid of naive BoxGeometry cubes -------------------------------
   // Deliberately one Mesh per cell (64 meshes), NOT InstancedMesh, per GDD
   // 4A explicit scope cut ("build naive first; only reach for InstancedMesh
@@ -730,7 +850,7 @@ export function createThreeScene(container) {
           }
         });
         scene.add(root);
-        const entry = { name: cfg.url.split('/').pop().replace('.gltf', ''), root, clips: [], actions: {}, activeAction: null, activeActionName: null, mixer: null };
+        const entry = { name: cfg.url.split('/').pop().replace('.gltf', ''), root, clips: [], actions: {}, activeAction: null, activeActionName: null, mixer: null, baseScale: scale, bouncePop: null };
         const clips = gltf.animations || [];
         entry.clips = clips;
         if (clips.length) {
@@ -840,6 +960,43 @@ export function createThreeScene(container) {
   function staggerDelay() {
     return MASCOT_STAGGER_MIN_MS + Math.random() * (MASCOT_STAGGER_MAX_MS - MASCOT_STAGGER_MIN_MS);
   }
+  // mascot-celebration-tiers (2026-07-29): the existing Wave/Yes/Headbutt/
+  // Jump_Start reaction clips are the only celebration animations these glTF
+  // files ship (see mascot-swap above), so a bigger celebration for
+  // combos/perfect-clears can't reach for a third distinct clip -- instead
+  // this layers a temporary scale-up "pop" (same reused-tween approach as
+  // triggerZoomPulse's board-group scale bump above: a vnow()-timed
+  // sin-eased scalar, just applied per-mascot-root instead of to
+  // boardGroup) on TOP of whichever reaction clip is already playing, so
+  // escalating tiers read as "bigger jump" without needing new assets.
+  //   - line-clear (1-2 lines, not bigClear): existing single-mascot small
+  //     reaction, no pop (unchanged from before this pass).
+  //   - bigClear (3+ lines, or near-empty board): existing all-mascot big
+  //     reaction, no pop (unchanged from before this pass).
+  //   - combo (comboStreak >= 2, i.e. chained clears across placements):
+  //     all-mascot big reaction PLUS a moderate pop.
+  //   - perfect clear (wholeFieldClear): all-mascot big reaction plus the
+  //     largest pop, the biggest celebration in the game.
+  const MASCOT_BOUNCE_MS = 320;
+  const MASCOT_BOUNCE_PEAK_COMBO = 0.18; // scale multiplier bump, e.g. 1.0 -> 1.18 -> 1.0
+  const MASCOT_BOUNCE_PEAK_PERFECT = 0.32;
+  function triggerMascotBounce(entry, peak) {
+    if (!entry) return;
+    entry.bouncePop = { startedAt: vnow(), peak };
+  }
+  function updateMascotBounce(now) {
+    for (const entry of mascots) {
+      if (!entry.bouncePop) continue;
+      const t = (now - entry.bouncePop.startedAt) / MASCOT_BOUNCE_MS;
+      if (t >= 1) {
+        entry.bouncePop = null;
+        entry.root.scale.setScalar(entry.baseScale);
+        continue;
+      }
+      const bump = Math.sin(t * Math.PI) * entry.bouncePop.peak; // 0 -> peak -> 0
+      entry.root.scale.setScalar(entry.baseScale * (1 + bump));
+    }
+  }
   function reactSingle(entry, big) {
     if (!entry || !entry.mixer) return;
     const pet = isPetMascot(entry);
@@ -849,16 +1006,22 @@ export function createThreeScene(container) {
     const clip = useBigClip ? (pet ? 'Jump_Start' : 'Yes') : (pet ? 'Headbutt' : 'Wave');
     fadeToAction(entry, clip, big ? 0.12 : 0.15, true);
   }
-  function triggerMascotReact(lineCount, bigClear) {
+  function triggerMascotReact(lineCount, bigClear, comboStreak = 0, wholeFieldClear = false) {
     if (!lineCount || lineCount <= 0) return;
-    const big = !!bigClear || lineCount >= 3;
+    const perfect = !!wholeFieldClear;
+    const combo = !perfect && comboStreak >= 2;
+    const big = !!bigClear || lineCount >= 3 || combo || perfect;
+    const bouncePeak = perfect ? MASCOT_BOUNCE_PEAK_PERFECT : (combo ? MASCOT_BOUNCE_PEAK_COMBO : 0);
     if (big) {
       // Bigger/more emphatic reaction: all four mascots react, staggered by
       // MASCOT_STAGGER_MIN_MS-MAX_MS each so they don't snap in lockstep,
       // each independently rolling its own clip (see reactSingle above).
       for (const entry of mascots) {
         if (!entry.mixer) continue;
-        setTimeout(() => reactSingle(entry, true), staggerDelay());
+        setTimeout(() => {
+          reactSingle(entry, true);
+          if (bouncePeak > 0) triggerMascotBounce(entry, bouncePeak);
+        }, staggerDelay());
       }
     } else if (mascots.length) {
       const entry = mascots[reactRotor % mascots.length];
@@ -1348,6 +1511,7 @@ export function createThreeScene(container) {
     updateGoldFlash(now);
     updateZoomAndShake(now);
     updateCubeVisuals(now);
+    updateSideParticles(now);
     if (lastMixerNow === null) lastMixerNow = now;
     const deltaMs = Math.max(0, now - lastMixerNow);
     lastMixerNow = now;
@@ -1355,6 +1519,7 @@ export function createThreeScene(container) {
       const deltaSec = deltaMs / 1000;
       for (const mixer of mascotMixers) mixer.update(deltaSec);
     }
+    updateMascotBounce(now);
     if (isDeathFreezeActive(now)) return; // GDD 12.8 freeze-frame: skip this render call entirely, same as main.js's draw()-skip
     // neon-blocks-pass: composer.render() (RenderPass+UnrealBloomPass+
     // OutputPass) replaces the old direct renderer.render(scene, camera).
@@ -1363,6 +1528,10 @@ export function createThreeScene(container) {
 
   function dispose() {
     backdropThemeObserver.disconnect();
+    scene.remove(sideParticles);
+    sideParticleGeo.dispose();
+    sideParticleMat.dispose();
+    sideParticleTexture.dispose();
     cubeGeo.dispose();
     placeholderMat.dispose();
     emptyCellMat.dispose();
@@ -1442,6 +1611,7 @@ export function createThreeScene(container) {
     triggerDeathSequence,
     // break-effect-pass addition:
     triggerBreakEffect,
+    sideParticles,
     // mascot-reactions addition:
     triggerMascotReact,
     // verification-only getters (window.__threeDebug wires these up):

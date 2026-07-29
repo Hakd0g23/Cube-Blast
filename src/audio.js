@@ -261,24 +261,49 @@ export function playPerfectClearVoice() {
 }
 
 // ---- background music --------------------------------------------------
-// A slow generative ambient loop, same synthesis toolkit (inharmonic sine
-// partials) as the sfx bell voice but soft/long-decay instead of a short
-// "chime" -- reads as a sustained glassy pad rather than another sfx hit.
-// Notes are drawn from a pentatonic-ish scale (no dissonant clashes however
-// they land) and scheduled ahead of `ac.currentTime` using a classic
-// look-ahead scheduler so timing survives tab-throttled setTimeout jitter.
-const BGM_SCALE = [261.63, 293.66, 329.63, 392.0, 440.0]; // C D E G A -- open, ambient, no leading tone
-const BGM_NOTE_MIN_GAP = 2.2;
-const BGM_NOTE_MAX_GAP = 4.2;
+// neon-arcade-bgm-pass (2026-07-29): the original loop here (see git history
+// for the retired playPad()/fully-random-gap scheduler) was a slow, sparse,
+// sine-only ambient pad -- functionally fine (procedural, zero licensing
+// risk, pause-safe) but read as "glassy/atmospheric," not "neon block-
+// breaker arcade." Per game-asset-director-style feedback, re-tuned the
+// SAME generative toolkit (still 100% synthesized, no external asset, same
+// licensing story as before) toward a punchier identity via three targeted
+// changes rather than a rewrite:
+//   1. Rhythmic pulse instead of free-floating notes: a quantized beat grid
+//      (BGM_BEAT_SEC) drives a steady on-beat bass pulse (the "four on the
+//      floor" arcade drive) plus a syncopated off-beat lead line, replacing
+//      the old fully-random 2.2-4.2s note gaps that had no discernible
+//      rhythm at all.
+//   2. Brighter timbre: playPulse() blends the original near-harmonic sine
+//      stack with a lowpass-filtered square-wave layer (`brightness` mix) --
+//      enough edge/bite to read as a synth pulse rather than a pure pad,
+//      the filter keeping it from turning into a buzzy/harsh square lead.
+//   3. Register spread: a real low bass note (BGM_BASS_ROOT, one octave
+//      below the old scale's root) under the lead line, instead of every
+//      note living in the same narrow mid register -- gives the loop actual
+//      low-end drive.
+// Scale itself is still a leading-tone-free minor-ish set (no jarring
+// dissonance regardless of how notes land), just centered a shade darker/
+// more driving than the old major-leaning C-D-E-G-A pentatonic.
+const BGM_TEMPO_BPM = 132;
+const BGM_BEAT_SEC = 60 / BGM_TEMPO_BPM;
+const BGM_SCALE = [220.0, 246.94, 261.63, 293.66, 329.63, 349.23, 392.0]; // A minor-ish (A B C D E F G), wider register than the old 5-note set for more melodic movement
+const BGM_BASS_ROOT = 110.0; // A2 -- one octave below the scale's root, drives the on-beat pulse
 const BGM_LOOKAHEAD = 2.0; // seconds of schedule to keep queued
 
-function playPad(freq, duration, gain, when, bus) {
+// Brighter synth-pulse voice: same look-ahead-scheduler/gain-envelope shape
+// as every other voice in this file, but blends a lowpass-filtered square
+// layer on top of the near-harmonic sine stack (see header comment above).
+// `brightness` (0-1) is the square layer's mix weight -- 0 collapses back to
+// the original pure-sine pad tone (kept as a dial, not hardcoded, so the
+// bass/lead calls below can each pick their own edge amount).
+function playPulse(freq, duration, gain, when, bus, brightness = 0) {
   const ac = getCtx();
   if (!ac) return;
   const t0 = ac.currentTime + when;
   const master = ac.createGain();
   master.gain.setValueAtTime(0, t0);
-  master.gain.linearRampToValueAtTime(gain, t0 + duration * 0.3);
+  master.gain.linearRampToValueAtTime(gain, t0 + Math.min(0.03, duration * 0.2));
   master.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
   master.connect(bus);
   const ratios = [1.0, 2.01, 3.0]; // near-harmonic -- softer/rounder than the sfx bell's inharmonic ratios
@@ -287,11 +312,30 @@ function playPad(freq, duration, gain, when, bus) {
     osc.type = 'sine';
     osc.frequency.setValueAtTime(freq * ratio, t0);
     const partialGain = ac.createGain();
-    partialGain.gain.setValueAtTime(1 / ratios.length, t0);
+    partialGain.gain.setValueAtTime((1 - brightness) / ratios.length, t0);
     osc.connect(partialGain);
     partialGain.connect(master);
     osc.start(t0);
     osc.stop(t0 + duration + 0.1);
+  }
+  if (brightness > 0) {
+    const sq = ac.createOscillator();
+    sq.type = 'square';
+    sq.frequency.setValueAtTime(freq, t0);
+    // Lowpass well above the fundamental (6x) so the square's edge reads as
+    // "bright/synthy" rather than buzzy -- a raw unfiltered square this loud
+    // would clash badly with the sfx bell voices' own inharmonic partials.
+    const filt = ac.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.setValueAtTime(freq * 6, t0);
+    filt.Q.value = 0.7;
+    const sqGain = ac.createGain();
+    sqGain.gain.setValueAtTime(brightness, t0);
+    sq.connect(filt);
+    filt.connect(sqGain);
+    sqGain.connect(master);
+    sq.start(t0);
+    sq.stop(t0 + duration + 0.1);
   }
 }
 
@@ -302,10 +346,21 @@ function scheduleBgmNotes() {
   const ac = getCtx();
   if (!ac || !bgmGain) return;
   while (bgmNextNoteAt < ac.currentTime + BGM_LOOKAHEAD) {
-    const freq = BGM_SCALE[Math.floor(Math.random() * BGM_SCALE.length)] * (Math.random() < 0.5 ? 1 : 0.5);
-    const duration = 2.6 + Math.random() * 1.4;
-    playPad(freq, duration, 0.16, bgmNextNoteAt - ac.currentTime, bgmGain);
-    bgmNextNoteAt += BGM_NOTE_MIN_GAP + Math.random() * (BGM_NOTE_MAX_GAP - BGM_NOTE_MIN_GAP);
+    const beatTime = bgmNextNoteAt - ac.currentTime;
+    // On-beat bass pulse -- fires every beat, the steady arcade "drive"
+    // underneath everything else. Short-ish (90% of a beat) so it reads as
+    // a pulse, not a sustained drone.
+    playPulse(BGM_BASS_ROOT, BGM_BEAT_SEC * 0.9, 0.13, beatTime, bgmGain, 0.5);
+    // Syncopated lead -- lands on the off-beat (half a beat after the bass),
+    // most beats but not all (0.85 chance) so the line still breathes
+    // instead of turning into a rigid mechanical arpeggio. Occasionally
+    // jumps up an octave for melodic movement/brightness variation.
+    if (Math.random() < 0.85) {
+      const octaveUp = Math.random() < 0.25 ? 2 : 1;
+      const freq = BGM_SCALE[Math.floor(Math.random() * BGM_SCALE.length)] * octaveUp;
+      playPulse(freq, BGM_BEAT_SEC * 1.6, 0.11, beatTime + BGM_BEAT_SEC * 0.5, bgmGain, 0.3);
+    }
+    bgmNextNoteAt += BGM_BEAT_SEC;
   }
   bgmTimer = setTimeout(scheduleBgmNotes, 500);
 }
